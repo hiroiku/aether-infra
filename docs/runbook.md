@@ -7,12 +7,49 @@
 ホスト上でプロジェクトを操作する。プロジェクトと同名のコンテナが 1:1 で対応する。
 
 ```
+project                                    ライブダッシュボード（q で終了）
 project create <name> [mem] [cpu] [disk]   作成して起動
 project remove <name> [-y]                 完全に削除
-project list                               一覧とリソース
+project list                               一覧とリソース（1 回だけ出力）
 project shell  <name> [command...]         コンテナに入る
 project info   <name>                      詳細
 ```
+
+### ライブダッシュボード
+
+引数なしで実行すると全画面のダッシュボードが開く。
+
+```bash
+ssh -t aether project
+```
+
+```
+  aether · Incus                                      2026-08-05 02:40:57   ⟳ 2s
+
+  HOST
+    load    0.15  0.11  0.11    cpu ░░░░░░░░░░░░    2%   (4 cores)    up 3h 30m
+    memory  ███░░░░░░░░░░░░░░░░░   19%  757.9M / 3.8G   swap 84.0K
+    disk    ██░░░░░░░░░░░░░░░░░░   11%  11.1G / 98.2G
+
+  PROJECTS  2 running / 3 total
+
+    PROJECT  NAME  STATE      ADDRESS          CPU  MEMORY                    PROC  NET ↓/↑   SNAP
+    api      api   ● running  10.10.0.248   0.4% /100%  102.2M/512.0M █░░░  20%   13  0B/0B      0
+    tui      tui   ● running  10.10.0.202   1.9% /100%  102.4M/768.0M █░░░  13%   13  0B/0B      0
+    default  base  ○ stopped  -                      -  -                      -  -            0
+
+  q quit   r refresh   +/- interval
+```
+
+| キー | 動作 |
+|---|---|
+| `q` / `Ctrl-C` | 終了 |
+| `r` | 即座に再描画 |
+| `+` / `-` | 更新間隔を変更（0.5〜30 秒） |
+
+CPU 使用率とネットワーク速度は累積カウンタの差分から算出するため、**初回フレームでは `-` になり 2 フレーム目から表示される**。CPU 列は「1 コアに対する使用率 / 割り当てクォータ」の形式。
+
+代替スクリーンを使うので、終了すると元の画面に戻る。
 
 ```bash
 project create blog                    # 既定 (1GiB / 2コア相当)

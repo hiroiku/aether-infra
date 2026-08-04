@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+# Managed by aether-infra
+"""Incus プロジェクトのライブダッシュボード。
+
+`project` を引数なしで実行すると起動する。q または Ctrl-C で終了。
+
+データは `incus list --all-projects -f json` の 1 回の呼び出しで全て取得する。
+CPU 使用率とネットワーク速度は累積カウンタの差分から算出するため、
+初回フレームでは表示されない（2 フレーム目以降に出る）。
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+DNS_DOMAIN = "{{ incus_dns_domain }}"
+REFRESH_MIN, REFRESH_MAX = 0.5, 30.0
+
+# ---------------------------------------------------------------------------
+# 表示
+# ---------------------------------------------------------------------------
+R = "\033[0m"
+B = "\033[1m"
+D = "\033[2m"
+RED = "\033[31m"
+GRN = "\033[32m"
+YEL = "\033[33m"
+BLU = "\033[34m"
+CYN = "\033[36m"
+GRY = "\033[90m"
+
+ALT_ON, ALT_OFF = "\033[?1049h", "\033[?1049l"
+CUR_HIDE, CUR_SHOW = "\033[?25l", "\033[?25h"
+HOME, CLR_EOL, CLR_EOS = "\033[H", "\033[K", "\033[J"
+
+ANSI_RE = re.compile(r"\033\[[0-9;?]*[a-zA-Z]")
+
+
+def visible_len(s: str) -> int:
+    return len(ANSI_RE.sub("", s))
+
+
+def pct_color(p: float) -> str:
+    if p >= 90:
+        return RED
+    if p >= 70:
+        return YEL
+    return GRN
+
+
+def bar(pct: float, width: int) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = int(pct * width / 100)
+    return f"{pct_color(pct)}{'█' * filled}{GRY}{'░' * (width - filled)}{R}"
+
+
+def human_bytes(n: float | None) -> str:
+    if n is None:
+        return "-"
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}T"
+
+
+SIZE_RE = re.compile(r"^([0-9.]+)\s*([KMGT]?i?B?)$", re.I)
+SIZE_MUL = {
+    "": 1, "b": 1,
+    "kb": 10**3, "kib": 1024,
+    "mb": 10**6, "mib": 1024**2,
+    "gb": 10**9, "gib": 1024**3,
+    "tb": 10**12, "tib": 1024**4,
+}
+
+
+def parse_size(s: str | None) -> int | None:
+    if not s:
+        return None
+    m = SIZE_RE.match(s.strip())
+    if not m:
+        return None
+    return int(float(m.group(1)) * SIZE_MUL.get(m.group(2).lower(), 1))
+
+
+def allowance_cores(s: str | None) -> float | None:
+    """'200ms/100ms' -> 2.0 コア相当。パーセント形式はハードキャップでないので None。"""
+    if not s or "/" not in s:
+        return None
+    try:
+        quota, period = (int(x.rstrip("ms")) for x in s.split("/", 1))
+        return quota / period if period else None
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# データ取得
+# ---------------------------------------------------------------------------
+def fetch_instances() -> tuple[list[dict], str | None]:
+    try:
+        out = subprocess.run(
+            ["incus", "list", "--all-projects", "-f", "json"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+        return json.loads(out), None
+    except subprocess.CalledProcessError as e:
+        return [], (e.stderr or "incus list に失敗しました").strip().splitlines()[-1]
+    except Exception as e:  # timeout / JSON 破損など
+        return [], f"{type(e).__name__}: {e}"
+
+
+def host_stats() -> dict:
+    st = {}
+    with open("/proc/loadavg") as f:
+        st["load"] = f.read().split()[:3]
+    with open("/proc/uptime") as f:
+        st["uptime"] = float(f.read().split()[0])
+
+    mem = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            k, v = line.split(":", 1)
+            mem[k] = int(v.split()[0]) * 1024
+    st["mem_total"] = mem["MemTotal"]
+    st["mem_used"] = mem["MemTotal"] - mem["MemAvailable"]
+    st["swap_total"] = mem.get("SwapTotal", 0)
+    st["swap_used"] = mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)
+
+    vfs = os.statvfs("/")
+    st["disk_total"] = vfs.f_blocks * vfs.f_frsize
+    st["disk_used"] = (vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize
+
+    with open("/proc/stat") as f:
+        parts = [int(x) for x in f.readline().split()[1:]]
+    st["cpu_total"] = sum(parts)
+    st["cpu_idle"] = parts[3] + (parts[4] if len(parts) > 4 else 0)
+    st["ncpu"] = os.cpu_count() or 1
+    return st
+
+
+def fmt_uptime(sec: float) -> str:
+    d, rem = divmod(int(sec), 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d:
+        return f"{d}d {h}h {m}m"
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+# ---------------------------------------------------------------------------
+# 描画
+# ---------------------------------------------------------------------------
+class Dashboard:
+    def __init__(self, refresh: float):
+        self.refresh = refresh
+        self.prev: dict[str, tuple[float, int, int, int]] = {}  # key -> (t, cpu_ns, rx, tx)
+        self.prev_host: dict | None = None
+        self.error: str | None = None
+        self.hostname = os.uname().nodename
+
+    def build(self, cols: int, rows: int) -> list[str]:
+        now = time.time()
+        instances, err = fetch_instances()
+        self.error = err
+        host = host_stats()
+        out: list[str] = []
+
+        # --- ヘッダ ---
+        title = f"{B}{self.hostname}{R} {GRY}·{R} {CYN}Incus{R}"
+        clock = time.strftime("%Y-%m-%d %H:%M:%S")
+        right = f"{GRY}{clock}   ⟳ {self.refresh:g}s{R}"
+        pad = max(1, cols - visible_len(title) - visible_len(right) - 2)
+        out.append("  " + title + " " * pad + right)
+        out.append("")
+
+        # --- ホスト ---
+        hcpu = 0.0
+        if self.prev_host:
+            dt = host["cpu_total"] - self.prev_host["cpu_total"]
+            di = host["cpu_idle"] - self.prev_host["cpu_idle"]
+            if dt > 0:
+                hcpu = max(0.0, (1 - di / dt) * 100)
+        self.prev_host = host
+
+        mp = host["mem_used"] / host["mem_total"] * 100
+        dp = host["disk_used"] / host["disk_total"] * 100
+
+        out.append(f"  {B}HOST{R}")
+        out.append(
+            f"    {GRY}load{R}    {'  '.join(host['load'])}"
+            f"    {GRY}cpu{R} {bar(hcpu, 12)} {pct_color(hcpu)}{hcpu:4.0f}%{R}"
+            f"   {GRY}({host['ncpu']} cores){R}"
+            f"    {GRY}up{R} {fmt_uptime(host['uptime'])}"
+        )
+        out.append(
+            f"    {GRY}memory{R}  {bar(mp, 20)} {pct_color(mp)}{mp:4.0f}%{R}"
+            f"  {human_bytes(host['mem_used'])} / {human_bytes(host['mem_total'])}"
+            + (f"   {GRY}swap{R} {human_bytes(host['swap_used'])}" if host["swap_used"] else "")
+        )
+        out.append(
+            f"    {GRY}disk{R}    {bar(dp, 20)} {pct_color(dp)}{dp:4.0f}%{R}"
+            f"  {human_bytes(host['disk_used'])} / {human_bytes(host['disk_total'])}"
+        )
+        out.append("")
+
+        # --- プロジェクト ---
+        running = sum(1 for i in instances if i.get("status") == "Running")
+        out.append(f"  {B}PROJECTS{R}  {GRY}{running} running / {len(instances)} total{R}")
+        out.append("")
+
+        rowdata = []
+        wproj, wname, wip = 7, 4, 7
+        for inst in sorted(instances, key=lambda i: (i.get("status") != "Running", i.get("project", ""), i.get("name", ""))):
+            proj = inst.get("project", "-")
+            name = inst.get("name", "-")
+            status = inst.get("status", "?")
+            state = inst.get("state") or {}
+            cfg = inst.get("expanded_config") or {}
+
+            ip = "-"
+            rx = tx = 0
+            for iface, nd in (state.get("network") or {}).items():
+                if iface == "lo":
+                    continue
+                for a in nd.get("addresses") or []:
+                    if a.get("family") == "inet" and ip == "-":
+                        ip = a.get("address", "-")
+                c = nd.get("counters") or {}
+                rx += c.get("bytes_received") or 0
+                tx += c.get("bytes_sent") or 0
+
+            mem_used = (state.get("memory") or {}).get("usage")
+            mem_limit = parse_size(cfg.get("limits.memory"))
+            cpu_ns = (state.get("cpu") or {}).get("usage") or 0
+            procs = state.get("processes")
+            cores = allowance_cores(cfg.get("limits.cpu.allowance"))
+            snaps = len(inst.get("snapshots") or [])
+
+            key = f"{proj}/{name}"
+            cpu_pct = net_rx = net_tx = None
+            if status == "Running" and key in self.prev:
+                pt, pcpu, prx, ptx = self.prev[key]
+                dt = now - pt
+                if dt > 0:
+                    cpu_pct = max(0.0, (cpu_ns - pcpu) / (dt * 1e9) * 100)
+                    net_rx = max(0, rx - prx) / dt
+                    net_tx = max(0, tx - ptx) / dt
+            if status == "Running":
+                self.prev[key] = (now, cpu_ns, rx, tx)
+            else:
+                self.prev.pop(key, None)
+
+            wproj = max(wproj, len(proj))
+            wname = max(wname, len(name))
+            wip = max(wip, len(ip))
+            rowdata.append((proj, name, status, ip, cpu_pct, cores, mem_used,
+                            mem_limit, procs, net_rx, net_tx, snaps))
+
+        # MEMORY 列の見た目の幅は 7+1+7+1+8+1+4 = 29。ヘッダと桁を合わせる。
+        header = (
+            f"    {GRY}{'PROJECT':<{wproj}}  {'NAME':<{wname}}  {'STATE':<9}  "
+            f"{'ADDRESS':<{wip}}  {'CPU':>13}  {'MEMORY':<29}  {'PROC':>4}  "
+            f"{'NET ↓/↑':<15}  {'SNAP':>4}{R}"
+        )
+        out.append(header)
+
+        badge = {
+            "Running": (GRN, "● running"),
+            "Stopped": (GRY, "○ stopped"),
+            "Frozen": (BLU, "◐ frozen"),
+        }
+
+        for (proj, name, status, ip, cpu_pct, cores, mu, ml, procs, nrx, ntx, snaps) in rowdata:
+            col, txt = badge.get(status, (YEL, f"◆ {status.lower()}"))
+
+            if cpu_pct is None:
+                cpu_cell = f"{GRY}{'-':>13}{R}"
+            else:
+                quota = f"/{cores * 100:.0f}%" if cores else ""
+                rel = cpu_pct / (cores * 100) * 100 if cores else cpu_pct
+                cpu_cell = f"{pct_color(rel)}{cpu_pct:6.1f}%{R}{GRY}{quota:>6}{R}"
+
+            # 停止中は state が 0 で埋まるため、値ではなく状態で判定する
+            if status != "Running" or not mu:
+                mem_cell = f"{GRY}{'-':<29}{R}"
+            elif ml:
+                p = mu / ml * 100
+                mem_cell = (f"{pct_color(p)}{human_bytes(mu):>7}{R}{GRY}/{R}"
+                            f"{human_bytes(ml):<7} {bar(p, 8)} {pct_color(p)}{p:3.0f}%{R}")
+            else:
+                mem_cell = f"{human_bytes(mu):>7}{GRY}/{'-':<7}{R}{'':<14}"
+
+            net_cell = (f"{GRY}{'-':<15}{R}" if nrx is None
+                        else f"{human_bytes(nrx):>6}{GRY}/{R}{human_bytes(ntx):<8}")
+
+            out.append(
+                f"    {proj:<{wproj}}  {B}{name:<{wname}}{R}  {col}{txt:<9}{R}  "
+                f"{ip:<{wip}}  {cpu_cell}  {mem_cell}  "
+                f"{(str(procs) if procs else '-'):>4}  {net_cell}  "
+                f"{(str(snaps) if snaps else GRY + '0' + R):>4}"
+            )
+
+        if not rowdata:
+            out.append(f"    {GRY}プロジェクトがありません。{R}{CYN}project create <name>{R} で作成します。")
+
+        # --- フッタ ---
+        while len(out) < rows - 2:
+            out.append("")
+        if self.error:
+            out.append(f"  {RED}✗ {self.error[:cols - 6]}{R}")
+        else:
+            out.append(f"  {GRY}接続: {CYN}herdr --remote <name>.{DNS_DOMAIN}{R}")
+        out.append(
+            f"  {GRY}{B}q{R}{GRY} quit   {B}r{R}{GRY} refresh   "
+            f"{B}+{R}{GRY}/{B}-{R}{GRY} interval{R}"
+        )
+        return out
+
+
+# ---------------------------------------------------------------------------
+# メインループ
+# ---------------------------------------------------------------------------
+def main() -> int:
+    if not sys.stdout.isatty():
+        print("project: ダッシュボードは端末でのみ利用できます。"
+              "`project list` を使ってください。", file=sys.stderr)
+        return 1
+
+    dash = Dashboard(refresh=2.0)
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd) if sys.stdin.isatty() else None
+
+    def cleanup(*_):
+        if old is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write(CUR_SHOW + ALT_OFF)
+        sys.stdout.flush()
+
+    signal.signal(signal.SIGTERM, lambda *_: (cleanup(), sys.exit(0)))
+
+    try:
+        if old is not None:
+            tty.setcbreak(fd)
+        sys.stdout.write(ALT_ON + CUR_HIDE)
+        while True:
+            cols, rows = shutil.get_terminal_size((100, 30))
+            lines = dash.build(cols, rows)
+            # cbreak では ONLCR が生きているので改行は "\n" だけでよい。
+            # "\r\n" を書くと CR が二重になる。
+            frame = HOME + "".join(
+                (ln if visible_len(ln) <= cols else ln[:cols]) + CLR_EOL + "\n"
+                for ln in lines[:rows]
+            ) + CLR_EOS
+            sys.stdout.write(frame)
+            sys.stdout.flush()
+
+            if sys.stdin.isatty():
+                ready, _, _ = select.select([sys.stdin], [], [], dash.refresh)
+                if ready:
+                    key = sys.stdin.read(1)
+                    if key in ("q", "Q", "\x03"):
+                        break
+                    if key in ("+", "="):
+                        dash.refresh = min(REFRESH_MAX, dash.refresh * 2)
+                    elif key == "-":
+                        dash.refresh = max(REFRESH_MIN, dash.refresh / 2)
+                    # r はそのまま即再描画
+            else:
+                time.sleep(dash.refresh)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cleanup()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

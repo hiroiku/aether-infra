@@ -103,6 +103,7 @@ require_project() {
 
 usage() {
   printf '\n%susage:%s %sproject%s <サブコマンド> [引数...]\n\n' "$B" "$R" "$CYN" "$R"
+  printf '  %s(引数なし)%s                         ライブダッシュボードを開く\n'      "$B" "$R"
   printf '  %screate%s <name> [mem] [cpu] [disk]   プロジェクトを作成して起動する\n'   "$B" "$R"
   printf '  %sremove%s <name> [-y]                 プロジェクトを完全に削除する\n'     "$B" "$R"
   printf '  %slist%s                               プロジェクトとリソースを一覧する\n' "$B" "$R"
@@ -166,7 +167,7 @@ cmd_create() {
   printf '\n'
   kv "address" "$ip"
   kv "memory"  "$mem"
-  kv "cpu"     "${cpu} cores ${GRY}(CFS quota)${R}"
+  kv "cpu"     "$(allowance_to_cores "$allowance") ${GRY}(CFS quota)${R}"
   kv "disk"    "${disk:-${GRY}unlimited${R}}"
   printf '\n'
   kv "attach"  "${CYN}herdr --remote ${name}.${DNS_DOMAIN}${R}"
@@ -363,6 +364,9 @@ case "${1:-}" in
   list|ls)           shift; cmd_list  "$@" ;;
   info)              shift; cmd_info  "$@" ;;
   shell|sh)          shift; cmd_shell "$@" ;;
-  ""|help|-h|--help) usage ;;
+  dash|top)          exec /usr/local/bin/project-tui ;;
+  help|-h|--help)    usage ;;
+  # 引数なしは端末ならライブダッシュボード、そうでなければ使い方を出す
+  "")                if [ "$IS_TTY" = 1 ]; then exec /usr/local/bin/project-tui; else usage; fi ;;
   *)                 printf '%s✗%s 不明なサブコマンド: %s\n' "$RED" "$R" "$1" >&2; usage; exit 1 ;;
 esac

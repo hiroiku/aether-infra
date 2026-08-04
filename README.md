@@ -7,6 +7,7 @@ Incus をハイパーバイザーとして使い、**プロジェクト単位で
 ```bash
 # ホストで
 project create blog             # プロジェクト作成 → コンテナ起動まで 1 コマンド
+project                         # ライブダッシュボード（q で終了）
 
 # 手元で（SSH config の編集は不要）
 herdr --remote blog.incus       # エージェントを多重化して実行

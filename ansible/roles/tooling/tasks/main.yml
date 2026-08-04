@@ -5,6 +5,12 @@
     dest: /usr/local/bin/project
     mode: "0755"
 
+- name: ライブダッシュボードを配置
+  ansible.builtin.template:
+    src: project-tui.j2
+    dest: /usr/local/bin/project-tui
+    mode: "0755"
+
 # newproj / rmproj / pj から project サブコマンドへ移行した名残を掃除する
 - name: 旧スクリプトを削除
   ansible.builtin.file:
