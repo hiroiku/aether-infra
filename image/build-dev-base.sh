@@ -112,6 +112,14 @@ set -e
 # ~/.local/bin のままだと herdr --remote が command not found になる。
 install -m 755 /home/${CONTAINER_USER}/.local/bin/herdr /usr/local/bin/herdr
 
+# claude / codex も同じ理由でシステム PATH から見えるようにする。
+# Ubuntu の ~/.bashrc は非対話シェルで早期 return するため、
+# ssh <host> 'claude ...' のようなワンショット実行では ~/.local/bin に PATH が通らない。
+# 実体をコピーせずシンボリックリンクにするのは、両者が自己更新でランチャーの
+# 指す先を差し替えるため。リンク経由なら更新に追随する。
+ln -sf /home/${CONTAINER_USER}/.local/bin/claude /usr/local/bin/claude
+ln -sf /home/${CONTAINER_USER}/.local/bin/codex  /usr/local/bin/codex
+
 # 対話シェル用の PATH（claude / codex は ~/.local/bin のまま使う）
 for f in /home/${CONTAINER_USER}/.bashrc /home/${CONTAINER_USER}/.profile; do
   [ -f "\$f" ] || continue

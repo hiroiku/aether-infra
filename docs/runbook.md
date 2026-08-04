@@ -2,18 +2,23 @@
 
 日常運用の早見表。構築手順は [README](../README.md) を参照。
 
-## プロジェクト
+## project コマンド
 
-| やること | コマンド（ホスト） |
-|---|---|
-| 作成 | `newproj <名前> [mem] [cpu] [disk]` |
-| 削除 | `rmproj <名前>` |
-| 一覧 | `incus list --all-projects -c ns4mM` |
+ホスト上でプロジェクトを操作する。プロジェクトと同名のコンテナが 1:1 で対応する。
+
+```
+project create <name> [mem] [cpu] [disk]   作成して起動
+project remove <name>                      完全に削除
+project list                               一覧とリソース
+project shell  <name> [command...]         コンテナに入る
+project info   <name>                      詳細
+```
 
 ```bash
-newproj blog                    # 既定 (1GiB / 2コア相当)
-newproj api 768MiB 1            # 軽量
-newproj build 2GiB 4 30GiB      # ディスク上限つき
+project create blog                    # 既定 (1GiB / 2コア相当)
+project create api 768MiB 1            # 軽量
+project create build 2GiB 4 30GiB      # ディスク上限つき
+project remove blog
 ```
 
 ## 入る
@@ -21,19 +26,19 @@ newproj build 2GiB 4 30GiB      # ディスク上限つき
 ### ホストから
 
 ```bash
-pj blog                         # dev のログインシェル
-pj blog 'cd ~/work && git status'  # ワンショット
-incus shell blog --project blog # root で入る
+project shell blog                          # dev のログインシェル
+project shell blog 'cd ~/work && git status'  # ワンショット
+incus shell blog --project blog             # root で入る
 ```
 
-`incus exec` 系は sshd やネットワークが壊れていても入れる。復旧時の最終手段。
+`project shell` は `incus exec` 経由なので、sshd やネットワークが壊れていても入れる。復旧時の最終手段。
 
 ### クライアントから
 
 ```bash
 herdr --remote blog.incus       # エージェント作業の本命
 ssh blog.incus                  # 素のシェル
-ssh blog.incus 'df -h'          # ワンショット
+ssh blog.incus 'claude --version'
 scp ./config.yml blog.incus:~/
 rsync -avz ./src/ blog.incus:~/work/
 ```
@@ -71,12 +76,11 @@ codex           # 同上
 ## リソース
 
 ```bash
-incus list --all-projects -c ns4mM   # プロジェクト横断でメモリ / ディスク
-free -h                              # ホスト全体
+project list                         # プロジェクト横断 + ホストのメモリ
 incus storage info default           # プール使用量
 ```
 
-**同時アクティブは 3〜4 プロジェクトが上限。** 空き 3.2GB に対し、開発サーバーとエージェントが動くコンテナは 300〜800MB を消費する。常駐させるものは `newproj api 768MiB 1` のように絞る。
+**同時アクティブは 3〜4 プロジェクトが上限。** 空き 3.2GB に対し、開発サーバーとエージェントが動くコンテナは 300〜800MB を消費する。常駐させるものは `project create api 768MiB 1` のように絞る。
 
 メモリもディスクも thin（上限であって予約ではない）ため、使っていないプロジェクトを停止せずに置いておくコストはほぼゼロ。
 
@@ -108,7 +112,7 @@ make image
 既存コンテナの CLI を今すぐ更新したい場合は、そのコンテナ内で実行する。
 
 ```bash
-pj blog 'agent-update'
+project shell blog 'agent-update'
 ```
 
 ## VM が必要になったら
@@ -129,6 +133,7 @@ incus launch dev-base sandbox --vm --project blog
 | コンテナ内 systemd が起動しない | `incus config get <名前> security.nesting --project <名前>` |
 | `.incus` が解決できない | `systemctl status incus-dns`、`resolvectl status incusbr0` |
 | SSH ホスト鍵の警告 | `rm ~/.ssh/known_hosts.incus`（コンテナ作り直し時は正常） |
-| コンテナに入れない | `pj <名前>` で incus 経由。ネットワークを介さない |
+| `ssh <host> 'cmd'` で command not found | `/usr/local/bin` にリンクがあるか。対話シェルでは通るが非対話では通らない |
+| コンテナに入れない | `project shell <名前>` で incus 経由。ネットワークを介さない |
 
 ホスト自体から締め出された場合は、ConoHa コントロールパネルのコンソール（VNC）から root パスワードでログインする。**サーバー作成時の root パスワードは控えておくこと。**

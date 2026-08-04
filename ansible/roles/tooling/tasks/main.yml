@@ -1,9 +1,15 @@
 ---
-- name: 運用スクリプトを配置
+- name: project コマンドを配置
   ansible.builtin.template:
-    src: "{{ item }}.j2"
-    dest: "/usr/local/bin/{{ item }}"
+    src: project.j2
+    dest: /usr/local/bin/project
     mode: "0755"
+
+# newproj / rmproj / pj から project サブコマンドへ移行した名残を掃除する
+- name: 旧スクリプトを削除
+  ansible.builtin.file:
+    path: "/usr/local/bin/{{ item }}"
+    state: absent
   loop:
     - newproj
     - rmproj

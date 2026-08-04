@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Managed by aether-infra
+#
+# プロジェクト（= Incus プロジェクト + 同名コンテナ）を操作する。
+#
+# プロジェクト名とコンテナ名を一致させることで <名前>.{{ incus_dns_domain }} で
+# 名前解決できるようにしている。固定 IP の採番も SSH config の追記も不要。
+set -euo pipefail
+
+IMAGE={{ golden_image_alias }}
+DNS_DOMAIN={{ incus_dns_domain }}
+CONTAINER_USER={{ container_user }}
+DEFAULT_MEM={{ default_memory }}
+DEFAULT_CPU={{ default_cpu }}
+
+# ---------------------------------------------------------------------------
+# ヘルパ
+# ---------------------------------------------------------------------------
+die() { echo "$*" >&2; exit 1; }
+
+project_exists() {
+  incus project list -f csv | cut -d, -f1 | sed 's/ (current)$//' | grep -qx "$1"
+}
+
+require_project() {
+  [ -n "${1:-}" ] || die "プロジェクト名を指定してください"
+  project_exists "$1" || die "存在しません: $1"
+}
+
+usage() {
+  cat <<USAGE
+usage: project <サブコマンド> [引数...]
+
+  create <name> [mem] [cpu] [disk]   プロジェクトを作成して起動する
+  remove <name>                      プロジェクトを完全に削除する
+  list                               プロジェクトとリソースを一覧する
+  shell  <name> [command...]         コンテナに入る（ホストから直接）
+  info   <name>                      1 プロジェクトの詳細
+
+  例:
+    project create blog                    # 既定 (${DEFAULT_MEM} / ${DEFAULT_CPU}コア相当)
+    project create api 768MiB 1            # 軽量
+    project create build 2GiB 4 30GiB      # ディスク上限つき
+    project remove blog
+    project shell blog
+    project shell blog 'cd ~/work && git status'
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# create
+# ---------------------------------------------------------------------------
+cmd_create() {
+  local name="${1:-}" mem="${2:-$DEFAULT_MEM}" cpu="${3:-$DEFAULT_CPU}" disk="${4:-}"
+
+  [ -n "$name" ] || die "usage: project create <name> [mem] [cpu] [disk]"
+  [[ "$name" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "名前は小文字英数字とハイフンのみ"
+  [[ "$cpu" =~ ^[0-9]+$ ]] && [ "$cpu" -ge 1 ] || die "cpu は 1 以上の整数で指定してください"
+  ! project_exists "$name" || die "既に存在します: $name"
+  incus image info "$IMAGE" >/dev/null 2>&1 \
+    || die "イメージ $IMAGE がありません。image/build-dev-base.sh を実行してください。"
+
+  # CPU はピン留め（limits.cpu=N）ではなく CFS クォータで制限する。
+  #   - limits.cpu=N            -> cpuset に固定され、空きコアがあっても使えない
+  #   - allowance=N00ms/100ms   -> ピン留めなし。スケジューラが全コアを使える
+  # allowance のパーセント形式（例 200%）は相対的な重みであってハードキャップに
+  # ならないため、必ず時間スライス形式を使う。
+  local allowance="$((cpu * 100))ms/100ms"
+
+  echo "→ プロジェクト作成"
+  incus project create "$name" -c features.profiles=false -c features.images=false >/dev/null
+
+  echo "→ コンテナ起動"
+  incus launch "$IMAGE" "$name" --project "$name" >/dev/null
+  incus config set "$name" limits.memory="$mem" limits.cpu.allowance="$allowance" --project "$name"
+
+  if [ -n "$disk" ]; then
+    incus config device override "$name" root size="$disk" --project "$name" >/dev/null
+    incus restart "$name" --project "$name"
+  fi
+
+  printf "→ 起動待ち"
+  local ip=""
+  for _ in $(seq 60); do
+    ip=$(incus list "$name" -c 4 -f csv --project "$name" 2>/dev/null | awk '{print $1}' || true)
+    [ -n "$ip" ] && break
+    printf "."
+    sleep 1
+  done
+  echo
+  [ -n "$ip" ] || die "IP を取得できませんでした。project info $name で確認してください"
+
+  cat <<MSG
+
+完了: $name  (mem=$mem / cpu=${cpu}コア相当(クォータ) / disk=${disk:-無制限} / $ip)
+
+  接続   : herdr --remote ${name}.${DNS_DOMAIN}
+  シェル : ssh ${name}.${DNS_DOMAIN}
+  ホスト : project shell ${name}
+MSG
+}
+
+# ---------------------------------------------------------------------------
+# remove
+# ---------------------------------------------------------------------------
+cmd_remove() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: project remove <name>"
+  [ "$name" != "default" ] || die "default は削除できません"
+  require_project "$name"
+
+  echo "--- $name の中身 ---"
+  incus list --project "$name"
+
+  read -rp "スナップショットごと完全に削除します。よろしいですか? [y/N] " answer
+  [ "$answer" = "y" ] || { echo "中止しました"; exit 1; }
+
+  local instance
+  for instance in $(incus list --project "$name" -c n -f csv); do
+    incus delete "$instance" --project "$name" --force
+  done
+  incus project delete "$name"
+
+  echo "削除しました: $name"
+}
+
+# ---------------------------------------------------------------------------
+# list / info
+# ---------------------------------------------------------------------------
+cmd_list() {
+  incus list --all-projects -c ns4mM
+  echo
+  free -h | head -2
+}
+
+cmd_info() {
+  require_project "${1:-}"
+  incus info "$1" --project "$1"
+}
+
+# ---------------------------------------------------------------------------
+# shell
+# ---------------------------------------------------------------------------
+# sshd やネットワークが壊れていても入れるため、復旧時の最終手段でもある。
+cmd_shell() {
+  local name="${1:-}"
+  require_project "$name"
+  shift
+
+  if [ $# -eq 0 ]; then
+    exec incus exec "$name" --project "$name" -- su - "$CONTAINER_USER"
+  else
+    exec incus exec "$name" --project "$name" -- su - "$CONTAINER_USER" -c "$*"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# ディスパッチ
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+  create)         shift; cmd_create "$@" ;;
+  remove|rm)      shift; cmd_remove "$@" ;;
+  list|ls)        shift; cmd_list "$@" ;;
+  info)           shift; cmd_info "$@" ;;
+  shell|sh)       shift; cmd_shell "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *)              echo "不明なサブコマンド: $1" >&2; echo; usage; exit 1 ;;
+esac

@@ -6,7 +6,7 @@ Incus をハイパーバイザーとして使い、**プロジェクト単位で
 
 ```bash
 # ホストで
-newproj blog                    # プロジェクト作成 → コンテナ起動まで 1 コマンド
+project create blog             # プロジェクト作成 → コンテナ起動まで 1 コマンド
 
 # 手元で（SSH config の編集は不要）
 herdr --remote blog.incus       # エージェントを多重化して実行
@@ -21,7 +21,7 @@ ssh blog.incus                  # 素のシェル
 |---|---|---|
 | ホストのブートストラップ | `ansible/` | ほぼ不変 |
 | ゴールデンイメージ | `image/build-dev-base.sh` | 時々 |
-| プロジェクト | `newproj`（実行時コマンド） | 毎日 |
+| プロジェクト | `project` コマンド（実行時） | 毎日 |
 | クライアント設定 | `client/ssh_config.incus` | ほぼ不変 |
 
 プロジェクトは使い捨てなので、あえて IaC の管理対象にしていない。state を持たせるより 1 コマンドで作り直せる方が実態に合う。
@@ -88,10 +88,10 @@ agent-update
 | DHCP も NAT も通らない | `ufw allow in on incusbr0` + `route allow` | `roles/incus` |
 | `.incus` 名が解決できない | `incus-dns.service` | `roles/incus` |
 | `/proc/cpuinfo` の CPU 数が絞れない | `lxcfs --enable-cfs` | `roles/incus` |
-| CPU 制限が効かない / コアに固定される | `limits.cpu.allowance` を時間スライス形式で | `roles/tooling/newproj` |
+| CPU 制限が効かない / コアに固定される | `limits.cpu.allowance` を時間スライス形式で | `roles/tooling/project` |
 | apt が異常に遅い | `Acquire::ForceIPv4` | `image/build-dev-base.sh` |
 | 全クローンが同じ SSH ホスト鍵になる | 初回起動時に再生成 | `image/build-dev-base.sh` |
-| `herdr --remote` が command not found | `/usr/local/bin` に置く | `image/build-dev-base.sh` |
+| `ssh <host> 'claude ...'` が command not found | `/usr/local/bin` にリンク | `image/build-dev-base.sh` |
 
 詳細は各ファイルのコメントを参照。
 
