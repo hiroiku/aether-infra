@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# Managed by aether-infra
+#
+# クライアント（手元のマシン）側のヘルパ。
+# コンテナ内の開発サーバーへ SSH トンネルを張る。
+#
+# ホストの localhost ではなく手元の localhost に繋ぐ必要があるため、
+# ホスト側の `project` コマンドではなくこちらで実装している。
+#
+# 既定でリモートと同じポート番号を手元の localhost に割り当てる。
+# これは利便性ではなく正しさのための仕様で、ブラウザが送る Host が
+# サーバー自身の認識（localhost:PORT）と一致し、
+# 絶対 URL・HMR・OAuth コールバック・Cookie がそのまま機能する。
+set -euo pipefail
+
+DNS_DOMAIN="${AETHER_DOMAIN:-aether}"
+STATE_DIR="${AETHER_STATE:-$HOME/.aether/forwards}"
+
+# ---------------------------------------------------------------------------
+# 表示
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+  R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
+  RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; CYN=$'\033[36m'; GRY=$'\033[90m'
+else
+  R=; B=; D=; RED=; GRN=; YEL=; CYN=; GRY=
+fi
+
+ok()   { printf '%s✓%s %s\n' "$GRN" "$R" "$1"; }
+warn() { printf '%s!%s %s\n' "$YEL" "$R" "$1" >&2; }
+die()  { printf '%s✗%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
+kv()   { printf '  %s%-9s%s %b\n' "$GRY" "$1" "$R" "$2"; }
+
+usage() {
+  printf '\n%susage:%s %saether%s <サブコマンド> [引数...]\n\n' "$B" "$R" "$CYN" "$R"
+  printf '  %sforward%s <name> <port> [local]   コンテナのポートを手元へ転送する\n' "$B" "$R"
+  printf '  %slist%s                            転送中の一覧\n'                     "$B" "$R"
+  printf '  %sstop%s    <name> [port] | all     転送を止める\n'                     "$B" "$R"
+  printf '  %sopen%s    <name> <port>           転送してブラウザで開く\n'            "$B" "$R"
+  printf '\n%s例:%s\n' "$GRY" "$R"
+  printf '  %saether forward blog 3000%s        %shttp://localhost:3000%s\n' "$D" "$R" "$GRY" "$R"
+  printf '  %saether open blog 5173%s\n'                                     "$D" "$R"
+  printf '  %saether stop all%s\n\n'                                         "$D" "$R"
+}
+
+state_file() { printf '%s/%s-%s.pid' "$STATE_DIR" "$1" "$2"; }
+
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+# ---------------------------------------------------------------------------
+# forward
+# ---------------------------------------------------------------------------
+cmd_forward() {
+  local name="${1:-}" port="${2:-}" local_port="${3:-}"
+  [ -n "$name" ] && [ -n "$port" ] || die "usage: aether forward <name> <port> [local]"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "ポートは数値で指定してください: $port"
+  local_port="${local_port:-$port}"
+  [[ "$local_port" =~ ^[0-9]+$ ]] || die "ポートは数値で指定してください: $local_port"
+
+  local host="${name}.${DNS_DOMAIN}"
+  mkdir -p "$STATE_DIR"
+  local pf; pf=$(state_file "$name" "$local_port")
+
+  if [ -f "$pf" ] && alive "$(cat "$pf" 2>/dev/null)"; then
+    warn "既に転送中です: localhost:${local_port} → ${host}:${port}"
+    return 0
+  fi
+  rm -f "$pf"
+
+  # 手元のポートが空いているか
+  if lsof -nP -iTCP:"$local_port" -sTCP:LISTEN >/dev/null 2>&1; then
+    die "手元の ${local_port} 番は既に使われています。第3引数で別のポートを指定してください。"
+  fi
+
+  # 相手側で listen しているかを確認する（していなくても張れるので警告のみ）
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+       "ss -ltn 2>/dev/null | grep -q ':${port}\\b'" 2>/dev/null; then
+    warn "${host} の ${port} 番はまだ listen していません（サーバー起動前でも転送は張れます）"
+  fi
+
+  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes \
+      -fN -L "127.0.0.1:${local_port}:localhost:${port}" "$host"
+
+  # -f で bg 化した ssh の PID を控える
+  local pid
+  pid=$(pgrep -f "ssh.*-L 127.0.0.1:${local_port}:localhost:${port} ${host}" | head -1)
+  [ -n "$pid" ] || die "トンネルの起動を確認できませんでした"
+  printf '%s' "$pid" > "$pf"
+
+  ok "${B}${name}${R} のポート ${port} を転送しました"
+  printf '\n'
+  kv "url"    "${CYN}http://localhost:${local_port}${R}"
+  kv "tunnel" "localhost:${local_port} ${GRY}→${R} ${host}:${port}"
+  kv "pid"    "$pid"
+  if [ "$local_port" != "$port" ]; then
+    printf '\n'
+    warn "手元と相手でポート番号が異なります（${local_port} ≠ ${port}）。"
+    printf '  %sサーバーが絶対 URL を出す場合、localhost:%s を指したリンクや%s\n' "$GRY" "$port" "$R"
+    printf '  %sHMR 接続が手元から辿れずに壊れることがあります。%s\n' "$GRY" "$R"
+  fi
+  printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+cmd_list() {
+  mkdir -p "$STATE_DIR"
+  local found=0 f base name lp pid
+  printf '\n%sFORWARDS%s\n\n' "$B" "$R"
+  printf '  %s%-16s  %-22s  %-8s  %s%s\n' "$GRY" "PROJECT" "URL" "PID" "TUNNEL" "$R"
+  for f in "$STATE_DIR"/*.pid; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f" .pid)
+    name=${base%-*}; lp=${base##*-}
+    pid=$(cat "$f" 2>/dev/null || true)
+    if alive "$pid"; then
+      found=1
+      printf '  %s%-16s%s  %-22s  %-8s  %s→ %s.%s%s\n' \
+        "$B" "$name" "$R" "http://localhost:$lp" "$pid" "$GRY" "$name" "$DNS_DOMAIN" "$R"
+    else
+      rm -f "$f"   # 死んだトンネルの後始末
+    fi
+  done
+  [ "$found" = 1 ] || printf '  %s転送中のものはありません%s\n' "$GRY" "$R"
+  printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# stop
+# ---------------------------------------------------------------------------
+cmd_stop() {
+  local target="${1:-}" port="${2:-}"
+  [ -n "$target" ] || die "usage: aether stop <name> [port] | all"
+  mkdir -p "$STATE_DIR"
+
+  local f base name lp pid stopped=0
+  for f in "$STATE_DIR"/*.pid; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f" .pid)
+    name=${base%-*}; lp=${base##*-}
+    [ "$target" = "all" ] || [ "$target" = "$name" ] || continue
+    [ -z "$port" ] || [ "$port" = "$lp" ] || continue
+    pid=$(cat "$f" 2>/dev/null || true)
+    alive "$pid" && kill "$pid" 2>/dev/null || true
+    rm -f "$f"
+    ok "停止: ${name} (localhost:${lp})"
+    stopped=1
+  done
+  [ "$stopped" = 1 ] || warn "該当する転送がありません: $target"
+}
+
+# ---------------------------------------------------------------------------
+# open
+# ---------------------------------------------------------------------------
+cmd_open() {
+  local name="${1:-}" port="${2:-}" local_port="${3:-}"
+  [ -n "$name" ] && [ -n "$port" ] || die "usage: aether open <name> <port>"
+  local_port="${local_port:-$port}"
+  cmd_forward "$name" "$port" "$local_port"
+  if command -v open >/dev/null 2>&1; then
+    open "http://localhost:${local_port}"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "http://localhost:${local_port}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# ディスパッチ
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+  forward|fw)        shift; cmd_forward "$@" ;;
+  list|ls)           shift; cmd_list ;;
+  stop|kill)         shift; cmd_stop "$@" ;;
+  open)              shift; cmd_open "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *)                 printf '%s✗%s 不明なサブコマンド: %s\n' "$RED" "$R" "$1" >&2; usage; exit 1 ;;
+esac

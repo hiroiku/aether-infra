@@ -111,6 +111,60 @@ dev@blog:~/workspace$
 scp ./config.yml blog.aether:workspace/     # 明示的に指定する
 ```
 
+## 成果物を確認する（ポート転送）
+
+コンテナ内の開発サーバーを手元のブラウザで見る。`client/aether` を手元の `~/.local/bin` などに置いて使う。
+
+```bash
+aether forward blog 3000     # → http://localhost:3000
+aether open    blog 5173     # 転送してブラウザまで開く
+aether list                  # 転送中の一覧
+aether stop    blog          # 停止（stop all で全部）
+```
+
+ホスト側の `project` ではなくクライアント側のコマンドである点に注意。SSH ポートフォワードは**手元のマシンから張らないと手元の localhost に繋がらない**ため。
+
+### なぜ「同じポート番号」を localhost に割り当てるのか
+
+これは利便性ではなく**正しさのための仕様**。
+
+エージェントが `localhost:3000` で起動したサーバーに `blog.aether:3000` で到達すると、ブラウザが送る `Host` はサーバー自身の認識と食い違う。この不一致は次を壊す。
+
+- 絶対 URL（`http://localhost:3000/assets/...` を吐く設定）
+- Vite / webpack の HMR WebSocket 接続先
+- OAuth の `redirect_uri`
+- Cookie のドメイン
+- Host ヘッダの許可リスト（Vite `allowedHosts` / Django `ALLOWED_HOSTS` / Rails `config.hosts`）
+
+`localhost:3000 → コンテナの localhost:3000` と**同じ番号**で転送すれば、ブラウザ側の origin とサーバー側の認識が完全に一致するため、**これらの問題が構造的に発生しない**。手元と相手でポート番号がずれる場合は `aether forward` が警告を出す。
+
+### 副次的な利点: 何も公開されない
+
+トンネルはコンテナ内部で終端して、そこから `localhost` に繋ぐ。したがって開発サーバーは `127.0.0.1` に bind したままでよく（多くのフレームワークの既定値）、**コンテナのブリッジ IP には何も listen しない**。
+
+```bash
+$ curl http://10.10.0.231:3000/     # ホストから
+http=000                            # 到達不可
+$ curl http://localhost:3000/       # 手元から（転送経由）
+HTTP/1.0 200 OK
+```
+
+他のコンテナからもホストからも見えないので、`0.0.0.0` に bind するより安全。
+
+### FQDN でのアクセスが本当に必要なとき
+
+実機のスマートフォンで確認したい、外部から Webhook を受けたい、他人に見せたい、といった場合は転送では足りず、**アプリ側に自分の公開 URL を教える**しかない。これはインフラでは吸収できない。
+
+| フレームワーク | 設定 |
+|---|---|
+| Vite | `server.host`, `server.allowedHosts`, `server.hmr.host`, `server.origin` |
+| Next.js | `assetPrefix`, `allowedDevOrigins` |
+| Django | `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS` |
+| Rails | `config.hosts` |
+| 汎用 | `APP_URL` / `PUBLIC_URL` / `BASE_URL` |
+
+リバースプロキシを挟んでも、アプリが `X-Forwarded-Host` を信頼する設定になっていなければ絶対 URL は直らない。
+
 ## エージェントを走らせる前に
 
 スナップショットが安全網の中心。壊されたら数秒で戻せる。

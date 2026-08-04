@@ -365,6 +365,15 @@ case "${1:-}" in
   info)              shift; cmd_info  "$@" ;;
   shell|sh)          shift; cmd_shell "$@" ;;
   dash|top)          exec /usr/local/bin/project-tui ;;
+  # ポート転送はホストではなくクライアント側で張る必要がある。
+  # ここで ssh -L を実行してもホストの localhost に繋がるだけで、
+  # 手元のブラウザからは到達できない。
+  forward|fw)
+    shift
+    printf '%s!%s ポート転送は手元のマシンで実行します:\n\n' "$YEL" "$R" >&2
+    printf '    %saether forward %s%s\n\n' "$CYN" "${*:-<name> <port>}" "$R" >&2
+    printf '  %sclient/aether を ~/.local/bin などに置いてください。%s\n' "$GRY" "$R" >&2
+    exit 1 ;;
   help|-h|--help)    usage ;;
   # 引数なしは端末ならライブダッシュボード、そうでなければ使い方を出す
   "")                if [ "$IS_TTY" = 1 ]; then exec /usr/local/bin/project-tui; else usage; fi ;;

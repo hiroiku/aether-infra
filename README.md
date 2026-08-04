@@ -23,7 +23,7 @@ ssh blog.aether                  # 素のシェル
 | ホストのブートストラップ | `ansible/` | ほぼ不変 |
 | ゴールデンイメージ | `image/build-dev-base.sh` | 時々 |
 | プロジェクト | `project` コマンド（実行時） | 毎日 |
-| クライアント設定 | `client/ssh_config.aether` | ほぼ不変 |
+| クライアント設定 | `client/ssh_config.aether`, `client/aether` | ほぼ不変 |
 
 プロジェクトは使い捨てなので、あえて IaC の管理対象にしていない。state を持たせるより 1 コマンドで作り直せる方が実態に合う。
 
@@ -59,7 +59,12 @@ make ping      # 疎通確認
 
 初回は `dev-base` イメージのビルドに **10〜20 分**かかる。btrfs のループバックプール越しに apt を回すため I/O が支配的で、これは正常。
 
-構築後、`client/ssh_config.aether` の内容を手元の `~/.ssh/config`（または Include 先）に反映する。
+構築後、`client/ssh_config.aether` の内容を手元の `~/.ssh/config`（または Include 先）に反映し、`client/aether` を `~/.local/bin` などに置く。
+
+```bash
+install -m 755 client/aether ~/.local/bin/aether
+aether forward blog 3000     # コンテナの開発サーバーを手元で見る
+```
 
 ## エージェント CLI の更新
 
