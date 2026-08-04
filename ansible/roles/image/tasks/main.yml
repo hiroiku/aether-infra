@@ -5,10 +5,12 @@
     state: directory
     mode: "0755"
 
-- name: build-dev-base.sh を配置
+# build-dev-base.sh は files/ 配下（ステータスライン等）を自分の隣から読むため、
+# ディレクトリごと配置する。
+- name: ビルドスクリプト一式を配置
   ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../image/build-dev-base.sh"
-    dest: /usr/local/lib/aether/build-dev-base.sh
+    src: "{{ playbook_dir }}/../image/"
+    dest: /usr/local/lib/aether/
     mode: "0755"
 
 - name: ゴールデンイメージの有無を確認

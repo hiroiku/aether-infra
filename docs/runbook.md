@@ -70,7 +70,7 @@ project remove blog -y                 # 確認を省く（スクリプト用）
 
 ```bash
 project shell blog                          # dev のログインシェル
-project shell blog 'cd ~/work && git status'  # ワンショット
+project shell blog 'cd ~/workspace && git status'  # ワンショット
 incus shell blog --project blog             # root で入る
 ```
 
@@ -83,7 +83,7 @@ herdr --remote blog.incus       # エージェント作業の本命
 ssh blog.incus                  # 素のシェル
 ssh blog.incus 'claude --version'
 scp ./config.yml blog.incus:~/
-rsync -avz ./src/ blog.incus:~/work/
+rsync -avz ./src/ blog.incus:~/workspace/
 ```
 
 herdr は 1 クライアント : 1 サーバーのため、複数プロジェクトを同時に見るならターミナルのタブを分ける。
@@ -95,6 +95,21 @@ herdr は 1 クライアント : 1 サーバーのため、複数プロジェク
 
 > 複数リモートの同時接続は upstream で最優先の計画中（未実装）。
 > 実装されればこの構成のまま横断ビューが手に入る。
+
+## 作業ディレクトリ
+
+コンテナには `~/workspace` が用意してあり、**対話ログイン時の初期ディレクトリ**になっている。
+
+```bash
+$ ssh blog.incus
+dev@blog:~/workspace$
+```
+
+`cd` を対話シェルに限定しているため、`scp` / `rsync` / `ssh <host> '<command>'` は影響を受けない（これらは非対話なので `~` のまま）。
+
+```bash
+scp ./config.yml blog.incus:workspace/     # 明示的に指定する
+```
 
 ## エージェントを走らせる前に
 
@@ -114,6 +129,21 @@ incus snapshot list blog --project blog
 ssh blog.incus
 claude          # ブラウザで認証
 codex           # 同上
+```
+
+## ステータスライン
+
+Claude Code のステータスラインは `~/.claude/statusline-command.sh` として同梱済みで、`~/.claude/settings.json` から有効になっている。追加の設定は不要。
+
+実体は `image/files/statusline-command.sh`。macOS と Linux の両方で動くよう、`stat` / `date` の BSD・GNU 差分を吸収するラッパを持たせてある。これが無いと Linux 上では mtime と日時整形が空になり、レート制限のバーとヒストグラムが描画されない。
+
+`jq` に依存するため、イメージには `jq` を同梱している。
+
+更新したいときは `image/files/statusline-command.sh` を編集して `make image`。**既存のコンテナには遡及しない**ので、その場で反映するなら次を実行する。
+
+```bash
+incus file push image/files/statusline-command.sh \
+  blog/home/dev/.claude/statusline-command.sh --project blog
 ```
 
 ## リソース

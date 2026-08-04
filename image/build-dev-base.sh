@@ -21,6 +21,9 @@
 #
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+STATUSLINE_SRC="${STATUSLINE_SRC:-$SCRIPT_DIR/files/statusline-command.sh}"
+
 IMAGE_SOURCE="${IMAGE_SOURCE:-images:ubuntu/26.04}"
 IMAGE_ALIAS="${IMAGE_ALIAS:-dev-base}"
 BUILD_CONTAINER="${BUILD_CONTAINER:-base}"
@@ -64,8 +67,9 @@ export DEBIAN_FRONTEND=noninteractive
 echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 
 apt-get update -qq
-# sudo は images: の最小イメージに入っていないことがあるため明示的に入れる
-apt-get install -y -qq sudo openssh-server curl ca-certificates git
+# sudo は images: の最小イメージに入っていないことがあるため明示的に入れる。
+# jq は Claude Code のステータスラインが依存している。
+apt-get install -y -qq sudo openssh-server curl ca-certificates git jq
 
 id ${CONTAINER_USER} >/dev/null 2>&1 || adduser --disabled-password --gecos "" ${CONTAINER_USER}
 usermod -aG sudo ${CONTAINER_USER}
@@ -102,6 +106,47 @@ incus exec "$BUILD_CONTAINER" -- su - "$CONTAINER_USER" -c \
   'export CODEX_NON_INTERACTIVE=true; curl -fsSL https://chatgpt.com/codex/install.sh | sh'
 
 # ---------------------------------------------------------------------------
+# Claude Code のステータスライン
+# ---------------------------------------------------------------------------
+log "ステータスラインを適用"
+if [ -f "$STATUSLINE_SRC" ]; then
+  incus exec "$BUILD_CONTAINER" -- install -d \
+    -o "$CONTAINER_USER" -g "$CONTAINER_USER" -m 755 "/home/${CONTAINER_USER}/.claude"
+  incus file push -q "$STATUSLINE_SRC" \
+    "${BUILD_CONTAINER}/home/${CONTAINER_USER}/.claude/statusline-command.sh"
+
+  incus exec "$BUILD_CONTAINER" -- bash -s <<STATUSLINE
+set -e
+S=/home/${CONTAINER_USER}/.claude/settings.json
+chmod 755 /home/${CONTAINER_USER}/.claude/statusline-command.sh
+
+cat > "\$S.new" <<'JSON'
+{
+  "statusLine": {
+    "type": "command",
+    "command": "sh /home/${CONTAINER_USER}/.claude/statusline-command.sh",
+    "refreshInterval": 10
+  }
+}
+JSON
+
+# 既存の設定があれば statusLine だけを重ねる（インストーラが将来
+# settings.json を置くようになっても他のキーを壊さないため）
+if [ -s "\$S" ]; then
+  jq -s '.[0] * .[1]' "\$S" "\$S.new" > "\$S.tmp" && mv "\$S.tmp" "\$S"
+  rm -f "\$S.new"
+else
+  mv "\$S.new" "\$S"
+fi
+
+chown -R ${CONTAINER_USER}:${CONTAINER_USER} /home/${CONTAINER_USER}/.claude
+jq -e '.statusLine.command' "\$S" >/dev/null
+STATUSLINE
+else
+  echo "警告: \$STATUSLINE_SRC が無いためステータスラインをスキップします" >&2
+fi
+
+# ---------------------------------------------------------------------------
 # 仕上げ
 # ---------------------------------------------------------------------------
 log "仕上げ"
@@ -129,6 +174,22 @@ for f in /home/${CONTAINER_USER}/.bashrc /home/${CONTAINER_USER}/.profile; do
 export PATH="\$HOME/.local/bin:\$PATH"
 PATHBLOCK
 done
+
+# 作業用ディレクトリ。エージェントにはここで作業させる。
+install -d -o ${CONTAINER_USER} -g ${CONTAINER_USER} -m 755 /home/${CONTAINER_USER}/workspace
+
+# ログイン時の初期ディレクトリを workspace にする。
+# 対話シェルに限定しているのは、scp / rsync / ssh <host> '<command>' の
+# 動作を変えないため（これらは非対話なので cd されない）。
+grep -q 'aether-infra workspace' /home/${CONTAINER_USER}/.profile || \
+  cat >> /home/${CONTAINER_USER}/.profile <<'WSBLOCK'
+
+# aether-infra workspace
+case \$- in
+  *i*) [ -d "\$HOME/workspace" ] && cd "\$HOME/workspace" ;;
+esac
+WSBLOCK
+
 chown ${CONTAINER_USER}:${CONTAINER_USER} /home/${CONTAINER_USER}/.bashrc /home/${CONTAINER_USER}/.profile
 
 # --- エージェント CLI の更新スクリプト ---
