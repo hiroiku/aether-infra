@@ -79,18 +79,18 @@ incus shell blog --project blog             # root で入る
 ### クライアントから
 
 ```bash
-herdr --remote blog.incus       # エージェント作業の本命
-ssh blog.incus                  # 素のシェル
-ssh blog.incus 'claude --version'
-scp ./config.yml blog.incus:~/
-rsync -avz ./src/ blog.incus:~/workspace/
+herdr --remote blog.aether       # エージェント作業の本命
+ssh blog.aether                  # 素のシェル
+ssh blog.aether 'claude --version'
+scp ./config.yml blog.aether:~/
+rsync -avz ./src/ blog.aether:~/workspace/
 ```
 
 herdr は 1 クライアント : 1 サーバーのため、複数プロジェクトを同時に見るならターミナルのタブを分ける。
 
 ```
-タブ1 ── herdr --remote blog.incus
-タブ2 ── herdr --remote api.incus
+タブ1 ── herdr --remote blog.aether
+タブ2 ── herdr --remote api.aether
 ```
 
 > 複数リモートの同時接続は upstream で最優先の計画中（未実装）。
@@ -101,14 +101,14 @@ herdr は 1 クライアント : 1 サーバーのため、複数プロジェク
 コンテナには `~/workspace` が用意してあり、**対話ログイン時の初期ディレクトリ**になっている。
 
 ```bash
-$ ssh blog.incus
+$ ssh blog.aether
 dev@blog:~/workspace$
 ```
 
 `cd` を対話シェルに限定しているため、`scp` / `rsync` / `ssh <host> '<command>'` は影響を受けない（これらは非対話なので `~` のまま）。
 
 ```bash
-scp ./config.yml blog.incus:workspace/     # 明示的に指定する
+scp ./config.yml blog.aether:workspace/     # 明示的に指定する
 ```
 
 ## エージェントを走らせる前に
@@ -126,7 +126,7 @@ incus snapshot list blog --project blog
 認証情報はイメージに焼いていないため、コンテナごとに一度ログインする。
 
 ```bash
-ssh blog.incus
+ssh blog.aether
 claude          # ブラウザで認証
 codex           # 同上
 ```
@@ -204,8 +204,8 @@ incus launch dev-base sandbox --vm --project blog
 |---|---|
 | コンテナが IP を取れない | `sudo ufw status`（incusbr0 の許可）、`incus network info incusbr0` の送信パケット数 |
 | コンテナ内 systemd が起動しない | `incus config get <名前> security.nesting --project <名前>` |
-| `.incus` が解決できない | `systemctl status incus-dns`、`resolvectl status incusbr0` |
-| SSH ホスト鍵の警告 | `rm ~/.ssh/known_hosts.incus`（コンテナ作り直し時は正常） |
+| `.aether` が解決できない | `systemctl status incus-dns`、`resolvectl status incusbr0` |
+| SSH ホスト鍵の警告 | `rm ~/.ssh/known_hosts.aether`（コンテナ作り直し時は正常） |
 | `ssh <host> 'cmd'` で command not found | `/usr/local/bin` にリンクがあるか。対話シェルでは通るが非対話では通らない |
 | コンテナに入れない | `project shell <名前>` で incus 経由。ネットワークを介さない |
 

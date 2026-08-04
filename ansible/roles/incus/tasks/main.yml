@@ -39,6 +39,18 @@
   ansible.builtin.shell: incus admin init --preseed < /etc/incus/preseed.yaml
   when: incus_pools.stdout | trim == ""
 
+# preseed は初回だけ流れるので、既存ホストのドメイン変更はここで収束させる
+- name: ブリッジの dns.domain を取得
+  ansible.builtin.command: "incus network get {{ incus_bridge }} dns.domain"
+  register: dns_domain_current
+  changed_when: false
+  failed_when: false
+
+- name: ブリッジの dns.domain を設定
+  ansible.builtin.command: "incus network set {{ incus_bridge }} dns.domain {{ incus_dns_domain }}"
+  when: dns_domain_current.stdout | trim != incus_dns_domain
+  notify: incus-dns を再起動
+
 # ---------------------------------------------------------------------------
 # ufw（これが無いとコンテナは DHCP も NAT も通らない）
 # ---------------------------------------------------------------------------

@@ -13,12 +13,12 @@ Host <踏み台のエイリアス>
 
 # Incus コンテナ。
 # ProxyJump は接続先ホスト名を踏み台側で解決するため、
-# ホストの systemd-resolved に登録済みの .incus 名がそのまま通る。
+# ホストの systemd-resolved に登録済みの .aether 名がそのまま通る。
 # プロジェクトを増やしてもこのブロックの編集は不要。
-Host *.incus
+Host *.aether
     User                    dev
     IdentityFile            ~/.ssh/key.d/<鍵名>
     ProxyJump               <踏み台のエイリアス>
     # プロジェクトを作り直すとホスト鍵が変わるため known_hosts を分けておく
-    UserKnownHostsFile      ~/.ssh/known_hosts.incus
+    UserKnownHostsFile      ~/.ssh/known_hosts.aether
     StrictHostKeyChecking   accept-new

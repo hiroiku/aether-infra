@@ -11,7 +11,7 @@ incus_admin_user: ubuntu
 incus_bridge: incusbr0
 incus_bridge_cidr: "10.10.0.1/24"
 # コンテナ名は <プロジェクト名>.{{ incus_dns_domain }} で解決される
-incus_dns_domain: incus
+incus_dns_domain: aether
 
 incus_storage_pool: default
 # btrfs を使う。ZFS は ARC がメモリを食うため、小さい VPS では不利。

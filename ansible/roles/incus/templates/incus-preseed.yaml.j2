@@ -11,6 +11,8 @@ networks:
     config:
       ipv4.address: {{ incus_bridge_cidr }}
       ipv4.nat: "true"
+      # コンテナ名の解決に使うドメイン (<name>.{{ incus_dns_domain }})
+      dns.domain: {{ incus_dns_domain }}
       # IPv6 は使わない。有効にすると apt が IPv6 経路を試して待たされる。
       ipv6.address: none
 

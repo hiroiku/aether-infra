@@ -10,8 +10,8 @@ project create blog             # プロジェクト作成 → コンテナ起�
 project                         # ライブダッシュボード（q で終了）
 
 # 手元で（SSH config の編集は不要）
-herdr --remote blog.incus       # エージェントを多重化して実行
-ssh blog.incus                  # 素のシェル
+herdr --remote blog.aether       # エージェントを多重化して実行
+ssh blog.aether                  # 素のシェル
 ```
 
 各コンテナには **herdr / Claude Code / Codex** が最新版で入った状態で起動する。
@@ -23,18 +23,18 @@ ssh blog.incus                  # 素のシェル
 | ホストのブートストラップ | `ansible/` | ほぼ不変 |
 | ゴールデンイメージ | `image/build-dev-base.sh` | 時々 |
 | プロジェクト | `project` コマンド（実行時） | 毎日 |
-| クライアント設定 | `client/ssh_config.incus` | ほぼ不変 |
+| クライアント設定 | `client/ssh_config.aether` | ほぼ不変 |
 
 プロジェクトは使い捨てなので、あえて IaC の管理対象にしていない。state を持たせるより 1 コマンドで作り直せる方が実態に合う。
 
 ```
 aether (ホスト) ── Incus 以外は動かさない
-├── project: blog   → container: blog   (10.10.0.x, blog.incus)
+├── project: blog   → container: blog   (10.10.0.x, blog.aether)
 ├── project: api    → container: api
 └── project: ...
 ```
 
-コンテナ名とプロジェクト名を一致させることで `<名前>.incus` で名前解決でき、固定 IP の採番も SSH config の追記も不要にしている。
+コンテナ名とプロジェクト名を一致させることで `<名前>.aether` で名前解決でき、固定 IP の採番も SSH config の追記も不要にしている。
 
 ## 前提
 
@@ -59,7 +59,7 @@ make ping      # 疎通確認
 
 初回は `dev-base` イメージのビルドに **10〜20 分**かかる。btrfs のループバックプール越しに apt を回すため I/O が支配的で、これは正常。
 
-構築後、`client/ssh_config.incus` の内容を手元の `~/.ssh/config`（または Include 先）に反映する。
+構築後、`client/ssh_config.aether` の内容を手元の `~/.ssh/config`（または Include 先）に反映する。
 
 ## エージェント CLI の更新
 
@@ -87,7 +87,7 @@ agent-update
 |---|---|---|
 | コンテナ内 systemd がクラッシュループする | `security.nesting=true` | `roles/incus` |
 | DHCP も NAT も通らない | `ufw allow in on incusbr0` + `route allow` | `roles/incus` |
-| `.incus` 名が解決できない | `incus-dns.service` | `roles/incus` |
+| `.aether` 名が解決できない | `incus-dns.service` | `roles/incus` |
 | `/proc/cpuinfo` の CPU 数が絞れない | `lxcfs --enable-cfs` | `roles/incus` |
 | CPU 制限が効かない / コアに固定される | `limits.cpu.allowance` を時間スライス形式で | `roles/tooling/project` |
 | apt が異常に遅い | `Acquire::ForceIPv4` | `image/build-dev-base.sh` |
