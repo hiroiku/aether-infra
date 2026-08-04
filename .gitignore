@@ -1,0 +1,5 @@
+*.retry
+.DS_Store
+ansible/*.log
+ansible/inventory.local.ini
+ansible/group_vars/local.yml

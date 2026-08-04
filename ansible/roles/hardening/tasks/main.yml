@@ -1,0 +1,46 @@
+---
+- name: ufw をインストール
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# 有効化より先に SSH を許可する。順序を逆にすると自分が締め出される。
+- name: ufw — SSH を許可
+  ansible.builtin.command: ufw allow OpenSSH
+  register: ufw_ssh
+  changed_when: "'Rule added' in ufw_ssh.stdout"
+
+- name: ufw の状態を取得
+  ansible.builtin.command: ufw status
+  register: ufw_status
+  changed_when: false
+
+- name: ufw を有効化
+  ansible.builtin.command: ufw --force enable
+  when: "'Status: inactive' in ufw_status.stdout"
+
+# root の直接ログインを禁止する。
+# Ubuntu 24.04 以降は sshd_config.d/*.conf が後勝ちで効くため、そこに置く。
+- name: root の SSH ログインを禁止
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/99-hardening.conf
+    mode: "0644"
+    content: |
+      # Managed by aether-infra
+      PermitRootLogin no
+  notify: sshd を再起動
+
+- name: 実効設定を確認
+  ansible.builtin.command: sshd -T
+  register: sshd_effective
+  changed_when: false
+
+- name: PermitRootLogin が no になっていること
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in sshd_effective.stdout"
+    fail_msg: >-
+      PermitRootLogin が no になっていません。
+      /etc/ssh/sshd_config.d/ 配下に競合する設定がないか確認してください。

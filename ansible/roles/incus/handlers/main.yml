@@ -1,0 +1,20 @@
+---
+- name: incus-dns を再起動
+  ansible.builtin.systemd:
+    name: incus-dns.service
+    state: restarted
+    daemon_reload: true
+
+# lxcfs を再起動すると、稼働中コンテナの /proc 仮想化は
+# そのコンテナを再起動するまで新しい設定を拾わない。
+- name: lxcfs を再起動
+  ansible.builtin.systemd:
+    name: lxcfs.service
+    state: restarted
+    daemon_reload: true
+
+- name: グループ反映の案内
+  ansible.builtin.debug:
+    msg: >-
+      {{ incus_admin_user }} を incus-admin グループに追加しました。
+      既存の SSH セッションには反映されないため、入り直してください。

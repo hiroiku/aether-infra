@@ -1,0 +1,36 @@
+# Managed by aether-infra
+# incus admin init --preseed に食わせる初期構成。
+# 対話プロンプトを避けて再現性を確保するためのもの。
+config:
+  # 小さい VPS ではキャッシュイメージの自動更新がディスクと帯域を食うので止める
+  images.auto_update_interval: "0"
+
+networks:
+  - name: {{ incus_bridge }}
+    type: bridge
+    config:
+      ipv4.address: {{ incus_bridge_cidr }}
+      ipv4.nat: "true"
+      # IPv6 は使わない。有効にすると apt が IPv6 経路を試して待たされる。
+      ipv6.address: none
+
+storage_pools:
+  - name: {{ incus_storage_pool }}
+    driver: {{ incus_storage_driver }}
+    config:
+      size: {{ incus_storage_size }}
+
+profiles:
+  - name: default
+    config:
+      # コンテナ内 systemd が入れ子ユーザー名前空間を作れるようにする（必須）
+      security.nesting: "true"
+    devices:
+      root:
+        path: /
+        pool: {{ incus_storage_pool }}
+        type: disk
+      eth0:
+        name: eth0
+        network: {{ incus_bridge }}
+        type: nic

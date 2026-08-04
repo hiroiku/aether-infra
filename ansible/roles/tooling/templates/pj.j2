@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Managed by aether-infra
+#
+# ホストからプロジェクトのコンテナに入る。
+# プロジェクト名とコンテナ名が同じ前提なので --project の重複を省ける。
+#
+#   pj blog                 -> {{ container_user }} のログインシェル
+#   pj blog 'git status'    -> ワンショット実行
+#
+# sshd やネットワークが壊れていても入れるため、復旧時の最終手段でもある。
+set -euo pipefail
+
+NAME="${1:-}"
+[ -n "$NAME" ] || { echo "usage: pj <project> [command...]" >&2; exit 1; }
+shift
+
+if [ $# -eq 0 ]; then
+  exec incus exec "$NAME" --project "$NAME" -- su - {{ container_user }}
+else
+  exec incus exec "$NAME" --project "$NAME" -- su - {{ container_user }} -c "$*"
+fi

@@ -1,0 +1,18 @@
+# Managed by aether-infra
+#
+# incus の dnsmasq が <コンテナ名>.{{ incus_dns_domain }} を解決できるので、
+# ホストの systemd-resolved にブリッジを DNS サーバーとして登録する。
+# resolvectl のリンク設定は再起動でリセットされるため unit にしている。
+[Unit]
+Description=Register Incus bridge DNS with systemd-resolved
+After=incus.service
+Requires=incus.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/resolvectl dns {{ incus_bridge }} {{ incus_bridge_cidr.split('/')[0] }}
+ExecStart=/usr/bin/resolvectl domain {{ incus_bridge }} ~{{ incus_dns_domain }}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

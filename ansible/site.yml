@@ -1,0 +1,19 @@
+---
+- name: Incus 仮想化ホストを構築する
+  hosts: incus_hosts
+  become: true
+  gather_facts: true
+
+  roles:
+    # SSH とファイアウォールの最低限の固め
+    - role: hardening
+      tags: [hardening]
+    # Incus 本体・ストレージ・ネットワーク・DNS・lxcfs
+    - role: incus
+      tags: [incus]
+    # newproj / rmproj / pj
+    - role: tooling
+      tags: [tooling]
+    # dev-base ゴールデンイメージ（時間がかかるので最後）
+    - role: image
+      tags: [image]

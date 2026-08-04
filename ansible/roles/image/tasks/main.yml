@@ -1,0 +1,39 @@
+---
+- name: スクリプト置き場
+  ansible.builtin.file:
+    path: /usr/local/lib/aether
+    state: directory
+    mode: "0755"
+
+- name: build-dev-base.sh を配置
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../image/build-dev-base.sh"
+    dest: /usr/local/lib/aether/build-dev-base.sh
+    mode: "0755"
+
+- name: ゴールデンイメージの有無を確認
+  ansible.builtin.command: "incus image list {{ golden_image_alias }} -f csv"
+  register: golden_image
+  changed_when: false
+  failed_when: false
+
+- name: ゴールデンイメージを構築
+  # ディスク I/O が遅いホストでは apt だけで 10〜15 分かかるため
+  # 非同期で回す。進捗は journalctl ではなく戻り値で確認する。
+  ansible.builtin.command: /usr/local/lib/aether/build-dev-base.sh
+  environment:
+    IMAGE_SOURCE: "{{ base_image_source }}"
+    IMAGE_ALIAS: "{{ golden_image_alias }}"
+    CONTAINER_USER: "{{ container_user }}"
+    AUTHORIZED_KEYS: "/home/{{ incus_admin_user }}/.ssh/authorized_keys"
+    AGENTS_AUTO_UPDATE: "{{ agents_auto_update | string | lower }}"
+  when: >-
+    golden_image.stdout | trim == ""
+    or (force_image_rebuild | default(false) | bool)
+  async: 2400
+  poll: 30
+  register: image_build
+
+- name: ビルド結果
+  ansible.builtin.debug:
+    msg: "{{ image_build.stdout_lines | default(['既存のイメージを再利用しました']) }}"

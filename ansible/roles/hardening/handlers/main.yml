@@ -1,0 +1,5 @@
+---
+# 構文チェックを通してから再起動する。設定ミスで sshd が落ちると復旧できなくなる。
+- name: sshd を再起動
+  ansible.builtin.shell: sshd -t && systemctl restart ssh
+  changed_when: true

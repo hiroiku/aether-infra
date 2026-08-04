@@ -1,0 +1,133 @@
+---
+# ---------------------------------------------------------------------------
+# インストール
+# ---------------------------------------------------------------------------
+- name: Incus と関連パッケージをインストール
+  ansible.builtin.apt:
+    name:
+      - incus          # daemon（qemu-system-x86 / swtpm / virtiofsd を依存で引くため VM も使える）
+      - incus-client   # CLI（incus パッケージの依存に入らないので明示する）
+      - btrfs-progs
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: 管理ユーザーを incus-admin グループに追加
+  ansible.builtin.user:
+    name: "{{ incus_admin_user }}"
+    groups: incus-admin
+    append: true
+  notify: グループ反映の案内
+
+# ---------------------------------------------------------------------------
+# 初期化（ストレージプールとブリッジ）
+# ---------------------------------------------------------------------------
+- name: 初期化済みかどうかを判定
+  ansible.builtin.command: incus storage list -f csv
+  register: incus_pools
+  changed_when: false
+  failed_when: false
+
+- name: preseed を配置
+  ansible.builtin.template:
+    src: incus-preseed.yaml.j2
+    dest: /etc/incus/preseed.yaml
+    mode: "0600"
+  when: incus_pools.stdout | trim == ""
+
+- name: incus admin init を実行
+  ansible.builtin.shell: incus admin init --preseed < /etc/incus/preseed.yaml
+  when: incus_pools.stdout | trim == ""
+
+# ---------------------------------------------------------------------------
+# ufw（これが無いとコンテナは DHCP も NAT も通らない）
+# ---------------------------------------------------------------------------
+# ufw の既定は reject(incoming) / deny(routed) のため、
+# ブリッジからの DHCP 要求も外向き転送も落とされる。
+# ブリッジ限定の許可であり、公開ポートは増えない。
+- name: ufw — コンテナからホストへの通信を許可（DHCP / DNS）
+  ansible.builtin.command: "ufw allow in on {{ incus_bridge }}"
+  register: ufw_in
+  changed_when: "'Rule added' in ufw_in.stdout"
+
+- name: ufw — コンテナの外向き転送を許可（NAT）
+  ansible.builtin.command: "ufw route allow in on {{ incus_bridge }}"
+  register: ufw_fwd
+  changed_when: "'Rule added' in ufw_fwd.stdout"
+
+# ---------------------------------------------------------------------------
+# コンテナ名の DNS 解決
+# ---------------------------------------------------------------------------
+# incus の dnsmasq は <name>.{{ incus_dns_domain }} を解決できるが、
+# ホストの systemd-resolved はブリッジを認識していないので登録する。
+# リンク設定は再起動でリセットされるため unit にして永続化する。
+- name: incus-dns.service を配置
+  ansible.builtin.template:
+    src: incus-dns.service.j2
+    dest: /etc/systemd/system/incus-dns.service
+    mode: "0644"
+  notify: incus-dns を再起動
+
+- name: incus-dns.service を有効化
+  ansible.builtin.systemd:
+    name: incus-dns.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# ---------------------------------------------------------------------------
+# lxcfs（/proc/cpuinfo の CPU 数仮想化）
+# ---------------------------------------------------------------------------
+# --enable-cfs を付けると、CFS クォータに応じて /proc/cpuinfo と
+# sysconf(_SC_NPROCESSORS_ONLN) の CPU 数が絞られる。
+# これにより「CPU ピン留めをせずにゲストへ N CPU を見せる」が成立する。
+- name: lxcfs の drop-in ディレクトリ
+  ansible.builtin.file:
+    path: /etc/systemd/system/lxcfs.service.d
+    state: directory
+    mode: "0755"
+
+- name: lxcfs に --enable-cfs を付ける
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/lxcfs.service.d/override.conf
+    mode: "0644"
+    content: |
+      # Managed by aether-infra
+      [Service]
+      ExecStart=
+      ExecStart=/usr/bin/lxcfs --enable-cfs /var/lib/lxcfs
+  notify: lxcfs を再起動
+
+# ---------------------------------------------------------------------------
+# default プロファイル
+# ---------------------------------------------------------------------------
+# security.nesting が無いと、コンテナ内の systemd が journald / networkd /
+# resolved をサンドボックス化する際の入れ子ユーザー名前空間の作成を
+# AppArmor に拒否され、sysinit.target に到達できずクラッシュループする
+# （ホストの kernel.apparmor_restrict_unprivileged_userns=1 が原因）。
+# ホスト全体の sysctl を緩めるのではなく、コンテナ単位で解決する。
+- name: default プロファイルの security.nesting を取得
+  ansible.builtin.command: incus profile get default security.nesting
+  register: nesting_current
+  changed_when: false
+  failed_when: false
+
+- name: default プロファイルに security.nesting=true を設定
+  ansible.builtin.command: incus profile set default security.nesting=true
+  when: nesting_current.stdout | trim != "true"
+
+# ---------------------------------------------------------------------------
+# 検証
+# ---------------------------------------------------------------------------
+- name: コンテナ名の解決を確認
+  ansible.builtin.command: "resolvectl status {{ incus_bridge }}"
+  register: resolv_check
+  changed_when: false
+
+- name: ブリッジが DNS スコープを持つこと
+  ansible.builtin.assert:
+    that:
+      - "'DNS Servers: ' ~ incus_bridge_cidr.split('/')[0] in resolv_check.stdout"
+    fail_msg: >-
+      {{ incus_bridge }} が systemd-resolved に登録されていません。
+      incus-dns.service の状態を確認してください。

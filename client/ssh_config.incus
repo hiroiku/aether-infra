@@ -1,0 +1,23 @@
+# aether-infra — クライアント（手元のマシン）側の SSH 設定
+#
+# ~/.ssh/config か、Include されているディレクトリに置く。
+# 例: ~/.ssh/conf.d/hiroiku/conoha.conf
+#
+# ホスト部分は環境に合わせて書き換えること。
+
+Host aether
+    HostName        163.44.115.148
+    User            ubuntu
+    IdentityFile    ~/.ssh/key.d/hiroiku
+
+# aether 上の Incus コンテナ。
+# ProxyJump は接続先ホスト名を踏み台側で解決するため、
+# ホストの systemd-resolved に登録済みの .incus 名がそのまま通る。
+# プロジェクトを増やしてもこのブロックの編集は不要。
+Host *.incus
+    User                    dev
+    IdentityFile            ~/.ssh/key.d/hiroiku
+    ProxyJump               aether
+    # プロジェクトを作り直すとホスト鍵が変わるため known_hosts を分けておく
+    UserKnownHostsFile      ~/.ssh/known_hosts.incus
+    StrictHostKeyChecking   accept-new
