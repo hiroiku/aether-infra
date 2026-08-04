@@ -106,6 +106,43 @@ def allowance_cores(s: str | None) -> float | None:
 # ---------------------------------------------------------------------------
 # データ取得
 # ---------------------------------------------------------------------------
+CGROUP_ROOT = "/sys/fs/cgroup"
+
+
+def cgroup_mem(project: str, name: str) -> dict | None:
+    """コンテナの cgroup から実使用量を読む。
+
+    incus が返す memory.usage は cgroup の memory.current で、ページキャッシュを
+    含む。キャッシュは上限まで貯まってから回収されるだけなので、これを使用率と
+    して見せると「常に 100% 近い」という誤った印象になる。
+    OOM に近いかどうかを表すのは anon（無名メモリ）の方。
+    """
+    for d in (f"{project}_{name}", name):
+        base = f"{CGROUP_ROOT}/lxc.payload.{d}"
+        try:
+            stat = {}
+            with open(f"{base}/memory.stat") as f:
+                for line in f:
+                    k, _, v = line.partition(" ")
+                    stat[k] = int(v)
+            ev = {}
+            try:
+                with open(f"{base}/memory.events") as f:
+                    for line in f:
+                        k, _, v = line.partition(" ")
+                        ev[k] = int(v)
+            except OSError:
+                pass
+            return {
+                "anon": stat.get("anon", 0),
+                "cache": stat.get("file", 0) + stat.get("slab", 0),
+                "oom_kill": ev.get("oom_kill", 0),
+            }
+        except OSError:
+            continue
+    return None
+
+
 def fetch_instances() -> tuple[list[dict], str | None]:
     try:
         out = subprocess.run(
@@ -239,8 +276,12 @@ class Dashboard:
                 rx += c.get("bytes_received") or 0
                 tx += c.get("bytes_sent") or 0
 
-            mem_used = (state.get("memory") or {}).get("usage")
             mem_limit = parse_size(cfg.get("limits.memory"))
+            # cgroup が読めれば anon を使う。読めなければ incus の値（キャッシュ込み）
+            cg = cgroup_mem(proj, name) if status == "Running" else None
+            mem_used = cg["anon"] if cg else (state.get("memory") or {}).get("usage")
+            mem_cache = cg["cache"] if cg else None
+            oom_kill = cg["oom_kill"] if cg else 0
             cpu_ns = (state.get("cpu") or {}).get("usage") or 0
             procs = state.get("processes")
             cores = allowance_cores(cfg.get("limits.cpu.allowance"))
@@ -264,13 +305,13 @@ class Dashboard:
             wname = max(wname, len(name))
             wip = max(wip, len(ip))
             rowdata.append((proj, name, status, ip, cpu_pct, cores, mem_used,
-                            mem_limit, procs, net_rx, net_tx, snaps))
+                            mem_limit, mem_cache, oom_kill, procs, net_rx, net_tx, snaps))
 
         # MEMORY 列の見た目の幅は 7+1+7+1+8+1+4 = 29。ヘッダと桁を合わせる。
         header = (
             f"    {GRY}{'PROJECT':<{wproj}}  {'NAME':<{wname}}  {'STATE':<9}  "
-            f"{'ADDRESS':<{wip}}  {'CPU':>13}  {'MEMORY':<29}  {'PROC':>4}  "
-            f"{'NET ↓/↑':<15}  {'SNAP':>4}{R}"
+            f"{'ADDRESS':<{wip}}  {'CPU':>13}  {'MEMORY':<29}  {'CACHE':>7}  "
+            f"{'PROC':>4}  {'NET ↓/↑':<15}  {'SNAP':>4}{R}"
         )
         out.append(header)
 
@@ -280,7 +321,8 @@ class Dashboard:
             "Frozen": (BLU, "◐ frozen"),
         }
 
-        for (proj, name, status, ip, cpu_pct, cores, mu, ml, procs, nrx, ntx, snaps) in rowdata:
+        for (proj, name, status, ip, cpu_pct, cores, mu, ml, mc, oomk,
+             procs, nrx, ntx, snaps) in rowdata:
             col, txt = badge.get(status, (YEL, f"◆ {status.lower()}"))
 
             if cpu_pct is None:
@@ -300,14 +342,20 @@ class Dashboard:
             else:
                 mem_cell = f"{human_bytes(mu):>7}{GRY}/{'-':<7}{R}{'':<14}"
 
+            cache_cell = (f"{GRY}{'-':>7}{R}" if mc is None
+                          else f"{GRY}{human_bytes(mc):>7}{R}")
+
             net_cell = (f"{GRY}{'-':<15}{R}" if nrx is None
                         else f"{human_bytes(nrx):>6}{GRY}/{R}{human_bytes(ntx):<8}")
 
+            # OOM kill は行末に出す。ここだけ可変長にして桁揃えを崩さない。
+            oom_cell = f"  {RED}⚠ oom×{oomk}{R}" if oomk else ""
+
             out.append(
                 f"    {proj:<{wproj}}  {B}{name:<{wname}}{R}  {col}{txt:<9}{R}  "
-                f"{ip:<{wip}}  {cpu_cell}  {mem_cell}  "
+                f"{ip:<{wip}}  {cpu_cell}  {mem_cell}  {cache_cell}  "
                 f"{(str(procs) if procs else '-'):>4}  {net_cell}  "
-                f"{(str(snaps) if snaps else GRY + '0' + R):>4}"
+                f"{(str(snaps) if snaps else GRY + '0' + R):>4}{oom_cell}"
             )
 
         if not rowdata:
@@ -319,7 +367,10 @@ class Dashboard:
         if self.error:
             out.append(f"  {RED}✗ {self.error[:cols - 6]}{R}")
         else:
-            out.append(f"  {GRY}接続: {CYN}herdr --remote <name>.{DNS_DOMAIN}{R}")
+            out.append(
+                f"  {GRY}MEMORY は実使用 (anon) / 上限。CACHE は上限まで貯まってから"
+                f"回収されるだけなので逼迫を意味しない。{R}"
+            )
         out.append(
             f"  {GRY}{B}q{R}{GRY} quit   {B}r{R}{GRY} refresh   "
             f"{B}+{R}{GRY}/{B}-{R}{GRY} interval{R}"
