@@ -8,7 +8,7 @@
 
 ```
 project create <name> [mem] [cpu] [disk]   作成して起動
-project remove <name>                      完全に削除
+project remove <name> [-y]                 完全に削除
 project list                               一覧とリソース
 project shell  <name> [command...]         コンテナに入る
 project info   <name>                      詳細
@@ -18,8 +18,14 @@ project info   <name>                      詳細
 project create blog                    # 既定 (1GiB / 2コア相当)
 project create api 768MiB 1            # 軽量
 project create build 2GiB 4 30GiB      # ディスク上限つき
-project remove blog
+
+project remove blog                    # プロジェクト名の入力を求められる
+project remove blog -y                 # 確認を省く（スクリプト用）
 ```
+
+`project remove` は確認としてプロジェクト名の入力を求める。取り消せない操作のため。
+
+出力は端末では色付きで表示され、**パイプ・リダイレクト時と `NO_COLOR` 指定時は自動的にプレーンテキストになる**ので、`project list | grep` のような使い方も壊れない。
 
 ## 入る
 

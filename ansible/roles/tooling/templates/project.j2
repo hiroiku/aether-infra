@@ -14,10 +14,84 @@ DEFAULT_MEM={{ default_memory }}
 DEFAULT_CPU={{ default_cpu }}
 
 # ---------------------------------------------------------------------------
+# 表示
+# ---------------------------------------------------------------------------
+# パイプ・リダイレクト時と NO_COLOR 指定時はエスケープを出さない。
+# `project list | grep` のような使い方を壊さないため。
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+  IS_TTY=1
+  R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
+  RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'
+  BLU=$'\033[34m'; CYN=$'\033[36m'; GRY=$'\033[90m'
+else
+  IS_TTY=0
+  R=; B=; D=; RED=; GRN=; YEL=; BLU=; CYN=; GRY=
+fi
+
+step()    { printf '%s▸%s %s\n' "$CYN" "$R" "$1"; }
+ok()      { printf '%s✓%s %s\n' "$GRN" "$R" "$1"; }
+warn()    { printf '%s!%s %s\n' "$YEL" "$R" "$1" >&2; }
+die()     { printf '%s✗%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
+heading() { printf '\n%s%s%s\n\n' "$B" "$1" "$R"; }
+kv()      { printf '  %s%-9s%s %b\n' "$GRY" "$1" "$R" "$2"; }
+rule()    { printf '  %s' "$GRY"; printf '─%.0s' $(seq 1 "${1:-70}"); printf '%s\n' "$R"; }
+
+# 使用率に応じた色（70%未満=緑 / 90%未満=黄 / 以上=赤）
+pct_color() {
+  local p=${1%%.*}; p=${p:-0}
+  if   [ "$p" -ge 90 ]; then printf '%s' "$RED"
+  elif [ "$p" -ge 70 ]; then printf '%s' "$YEL"
+  else                       printf '%s' "$GRN"
+  fi
+}
+
+# 使用率バー: bar <percent> <width>
+bar() {
+  local p=${1%%.*} w=${2:-16} i filled
+  p=${p:-0}
+  filled=$(( p * w / 100 ))
+  [ "$filled" -gt "$w" ] && filled=$w
+  [ "$filled" -lt 0 ] && filled=0
+  printf '%s' "$(pct_color "$p")"
+  for ((i = 0; i < filled; i++)); do printf '█'; done
+  printf '%s' "$GRY"
+  for ((i = filled; i < w; i++)); do printf '░'; done
+  printf '%s' "$R"
+}
+
+# 色と文字列を分けておく。色付き文字列を printf の幅指定に渡すと
+# エスケープのバイト数まで桁数に数えられて表が崩れるため。
+state_text() {
+  case "$1" in
+    RUNNING) printf '● running' ;;
+    STOPPED) printf '○ stopped' ;;
+    FROZEN)  printf '◐ frozen'  ;;
+    *)       printf '◆ %s' "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" ;;
+  esac
+}
+state_color() {
+  case "$1" in
+    RUNNING) printf '%s' "$GRN" ;;
+    STOPPED) printf '%s' "$GRY" ;;
+    FROZEN)  printf '%s' "$BLU" ;;
+    *)       printf '%s' "$YEL" ;;
+  esac
+}
+
+# CFS クォータ (200ms/100ms) を人間向けに (2 cores) へ直す
+allowance_to_cores() {
+  local n
+  case "${1:-}" in
+    "")      printf '-' ;;
+    *ms/*ms) n=$(( ${1%%ms/*} / 100 ))
+             [ "$n" = 1 ] && printf '1 core' || printf '%s cores' "$n" ;;
+    *)       printf '%s' "$1" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # ヘルパ
 # ---------------------------------------------------------------------------
-die() { echo "$*" >&2; exit 1; }
-
 project_exists() {
   incus project list -f csv | cut -d, -f1 | sed 's/ (current)$//' | grep -qx "$1"
 }
@@ -28,23 +102,18 @@ require_project() {
 }
 
 usage() {
-  cat <<USAGE
-usage: project <サブコマンド> [引数...]
-
-  create <name> [mem] [cpu] [disk]   プロジェクトを作成して起動する
-  remove <name>                      プロジェクトを完全に削除する
-  list                               プロジェクトとリソースを一覧する
-  shell  <name> [command...]         コンテナに入る（ホストから直接）
-  info   <name>                      1 プロジェクトの詳細
-
-  例:
-    project create blog                    # 既定 (${DEFAULT_MEM} / ${DEFAULT_CPU}コア相当)
-    project create api 768MiB 1            # 軽量
-    project create build 2GiB 4 30GiB      # ディスク上限つき
-    project remove blog
-    project shell blog
-    project shell blog 'cd ~/work && git status'
-USAGE
+  printf '\n%susage:%s %sproject%s <サブコマンド> [引数...]\n\n' "$B" "$R" "$CYN" "$R"
+  printf '  %screate%s <name> [mem] [cpu] [disk]   プロジェクトを作成して起動する\n'   "$B" "$R"
+  printf '  %sremove%s <name> [-y]                 プロジェクトを完全に削除する\n'     "$B" "$R"
+  printf '  %slist%s                               プロジェクトとリソースを一覧する\n' "$B" "$R"
+  printf '  %sshell%s  <name> [command...]         コンテナに入る（ホストから直接）\n' "$B" "$R"
+  printf '  %sinfo%s   <name>                      1 プロジェクトの詳細\n'             "$B" "$R"
+  printf '\n%s例:%s\n' "$GRY" "$R"
+  printf '  %sproject create blog%s                %s既定 (%s / %s コア相当)%s\n' "$D" "$R" "$GRY" "$DEFAULT_MEM" "$DEFAULT_CPU" "$R"
+  printf '  %sproject create api 768MiB 1%s        %s軽量%s\n'                    "$D" "$R" "$GRY" "$R"
+  printf '  %sproject create build 2GiB 4 30GiB%s  %sディスク上限つき%s\n'         "$D" "$R" "$GRY" "$R"
+  printf '  %sproject shell blog%s\n'                                            "$D" "$R"
+  printf "  %sproject shell blog 'git status'%s\n\n"                             "$D" "$R"
 }
 
 # ---------------------------------------------------------------------------
@@ -54,8 +123,8 @@ cmd_create() {
   local name="${1:-}" mem="${2:-$DEFAULT_MEM}" cpu="${3:-$DEFAULT_CPU}" disk="${4:-}"
 
   [ -n "$name" ] || die "usage: project create <name> [mem] [cpu] [disk]"
-  [[ "$name" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "名前は小文字英数字とハイフンのみ"
-  [[ "$cpu" =~ ^[0-9]+$ ]] && [ "$cpu" -ge 1 ] || die "cpu は 1 以上の整数で指定してください"
+  [[ "$name" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "名前は小文字英数字とハイフンのみ: $name"
+  [[ "$cpu" =~ ^[0-9]+$ ]] && [ "$cpu" -ge 1 ] || die "cpu は 1 以上の整数で指定してください: $cpu"
   ! project_exists "$name" || die "既に存在します: $name"
   incus image info "$IMAGE" >/dev/null 2>&1 \
     || die "イメージ $IMAGE がありません。image/build-dev-base.sh を実行してください。"
@@ -67,75 +136,206 @@ cmd_create() {
   # ならないため、必ず時間スライス形式を使う。
   local allowance="$((cpu * 100))ms/100ms"
 
-  echo "→ プロジェクト作成"
+  printf '\n'
+  step "プロジェクトを作成"
   incus project create "$name" -c features.profiles=false -c features.images=false >/dev/null
 
-  echo "→ コンテナ起動"
+  step "コンテナを起動"
   incus launch "$IMAGE" "$name" --project "$name" >/dev/null
   incus config set "$name" limits.memory="$mem" limits.cpu.allowance="$allowance" --project "$name"
 
   if [ -n "$disk" ]; then
+    step "ディスク上限を設定"
     incus config device override "$name" root size="$disk" --project "$name" >/dev/null
     incus restart "$name" --project "$name"
   fi
 
-  printf "→ 起動待ち"
-  local ip=""
-  for _ in $(seq 60); do
+  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) i ip=""
+  for ((i = 0; i < 120; i++)); do
     ip=$(incus list "$name" -c 4 -f csv --project "$name" 2>/dev/null | awk '{print $1}' || true)
     [ -n "$ip" ] && break
-    printf "."
-    sleep 1
+    if [ "$IS_TTY" = 1 ]; then
+      printf '\r%s%s%s ネットワークを待機中...' "$CYN" "${frames[i % 10]}" "$R"
+    fi
+    sleep 0.5
   done
-  echo
+  [ "$IS_TTY" = 1 ] && printf '\r\033[2K'
   [ -n "$ip" ] || die "IP を取得できませんでした。project info $name で確認してください"
 
-  cat <<MSG
-
-完了: $name  (mem=$mem / cpu=${cpu}コア相当(クォータ) / disk=${disk:-無制限} / $ip)
-
-  接続   : herdr --remote ${name}.${DNS_DOMAIN}
-  シェル : ssh ${name}.${DNS_DOMAIN}
-  ホスト : project shell ${name}
-MSG
+  ok "${B}${name}${R} を作成しました"
+  printf '\n'
+  kv "address" "$ip"
+  kv "memory"  "$mem"
+  kv "cpu"     "${cpu} cores ${GRY}(CFS quota)${R}"
+  kv "disk"    "${disk:-${GRY}unlimited${R}}"
+  printf '\n'
+  kv "attach"  "${CYN}herdr --remote ${name}.${DNS_DOMAIN}${R}"
+  kv "shell"   "${CYN}ssh ${name}.${DNS_DOMAIN}${R}"
+  kv "host"    "${CYN}project shell ${name}${R}"
+  printf '\n'
 }
 
 # ---------------------------------------------------------------------------
 # remove
 # ---------------------------------------------------------------------------
 cmd_remove() {
-  local name="${1:-}"
-  [ -n "$name" ] || die "usage: project remove <name>"
+  local name="" force=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      -y|--yes|--force) force=1 ;;
+      -*)               die "不明なオプション: $arg" ;;
+      *)                name="$arg" ;;
+    esac
+  done
+
+  [ -n "$name" ] || die "usage: project remove <name> [-y]"
   [ "$name" != "default" ] || die "default は削除できません"
   require_project "$name"
 
-  echo "--- $name の中身 ---"
-  incus list --project "$name"
+  if [ "$force" = 0 ]; then
+    heading "REMOVE  ${RED}${name}${R}"
 
-  read -rp "スナップショットごと完全に削除します。よろしいですか? [y/N] " answer
-  [ "$answer" = "y" ] || { echo "中止しました"; exit 1; }
+    local inst state snaps
+    while IFS=, read -r inst state _ipv4 _ipv6 _type snaps; do
+      [ -n "$inst" ] || continue
+      printf '  %-20s %s%-9s%s  %ssnapshots %s%s\n' \
+        "$inst" "$(state_color "$state")" "$(state_text "$state")" "$R" \
+        "$GRY" "${snaps:-0}" "$R"
+    done < <(incus list --project "$name" -f csv)
 
-  local instance
-  for instance in $(incus list --project "$name" -c n -f csv); do
-    incus delete "$instance" --project "$name" --force
+    printf '\n  %sスナップショットごと完全に削除します。取り消せません。%s\n' "$YEL" "$R"
+    printf '  続行するには %s%s%s と入力: ' "$B" "$name" "$R"
+    local answer; read -r answer
+    [ "$answer" = "$name" ] || { printf '\n'; warn "中止しました"; exit 1; }
+    printf '\n'
+  fi
+
+  local inst
+  for inst in $(incus list --project "$name" -c n -f csv); do
+    step "削除: $inst"
+    incus delete "$inst" --project "$name" --force
   done
   incus project delete "$name"
-
-  echo "削除しました: $name"
+  ok "${B}${name}${R} を削除しました"
+  printf '\n'
 }
 
 # ---------------------------------------------------------------------------
-# list / info
+# list
 # ---------------------------------------------------------------------------
 cmd_list() {
-  incus list --all-projects -c ns4mM
-  echo
-  free -h | head -2
+  local proj name state ipv4 mem memp limit allow cores
+  local -a rows=()
+  local wproj=7 wname=4 wip=7
+
+  while IFS=, read -r proj name state ipv4 _ipv6 _type _snaps; do
+    [ -n "$name" ] || continue
+    ipv4=${ipv4%% *}                       # "10.0.0.1 (eth0)" -> "10.0.0.1"
+    # 表の中の空欄は ASCII の "-" を使う。printf の幅指定はバイト数で数えるため、
+    # 3 バイトの "—"(em dash) を混ぜると桁が 2 つずれる。
+    [ -n "$ipv4" ] || ipv4="-"
+
+    mem=""; memp=""
+    if [ "$state" = "RUNNING" ]; then
+      IFS=, read -r mem memp < <(incus list "$name" --project "$proj" -f csv -c mM 2>/dev/null || printf ',')
+      memp=${memp%\%}
+    fi
+    allow=$(incus config get "$name" limits.cpu.allowance --project "$proj" 2>/dev/null || true)
+    cores=$(allowance_to_cores "$allow")
+
+    [ ${#proj} -gt $wproj ] && wproj=${#proj}
+    [ ${#name} -gt $wname ] && wname=${#name}
+    [ ${#ipv4} -gt $wip ]   && wip=${#ipv4}
+
+    rows+=("$proj|$name|$state|$ipv4|$mem|$memp|$cores")
+  done < <(incus list --all-projects -f csv)
+
+  heading "PROJECTS"
+
+  if [ ${#rows[@]} -eq 0 ]; then
+    printf '  %sプロジェクトがありません。%s%sproject create <name>%s で作成します。\n\n' \
+      "$GRY" "$R" "$CYN" "$R"
+    return
+  fi
+
+  printf '  %s%-*s  %-*s  %-9s  %-*s  %-25s  %s%s\n' \
+    "$GRY" "$wproj" "PROJECT" "$wname" "NAME" "STATE" "$wip" "ADDRESS" "MEMORY" "CPU" "$R"
+
+  local row
+  for row in "${rows[@]}"; do
+    IFS='|' read -r proj name state ipv4 mem memp cores <<<"$row"
+
+    printf '  %-*s  %s%-*s%s  %s%-9s%s  %-*s  ' \
+      "$wproj" "$proj" \
+      "$B" "$wname" "$name" "$R" \
+      "$(state_color "$state")" "$(state_text "$state")" "$R" \
+      "$wip" "$ipv4"
+
+    if [ -z "$mem" ]; then
+      # MEMORY 列の見た目の幅（9 + 1 + 10 + 1 + 4 = 25）に合わせる
+      printf '%s%-25s%s' "$GRY" "-" "$R"
+    else
+      printf '%s%9s%s %s %s%3s%%%s' \
+        "$(pct_color "$memp")" "$mem" "$R" \
+        "$(bar "$memp" 10)" \
+        "$(pct_color "$memp")" "${memp%%.*}" "$R"
+    fi
+    printf '  %s\n' "$cores"
+  done
+
+  # --- ホスト側のサマリ ---
+  local hm_total hm_used hm_pct hd_size hd_used hd_pct
+  read -r hm_total hm_used < <(free -m | awk '/^Mem:/{print $2, $3}')
+  hm_pct=$(( hm_used * 100 / hm_total ))
+  read -r hd_size hd_used hd_pct < <(df -h --output=size,used,pcent / | tail -1)
+  hd_pct=${hd_pct//[^0-9]/}
+
+  printf '\n'
+  rule 74
+  printf '  %sHOST%s  memory %s%6s%s /%6s MiB %s %s%3s%%%s    disk %s%5s%s /%5s %s %s%3s%%%s\n\n' \
+    "$GRY" "$R" \
+    "$(pct_color "$hm_pct")" "$hm_used" "$R" "$hm_total" "$(bar "$hm_pct" 12)" \
+    "$(pct_color "$hm_pct")" "$hm_pct" "$R" \
+    "$(pct_color "$hd_pct")" "$hd_used" "$R" "$hd_size" "$(bar "$hd_pct" 12)" \
+    "$(pct_color "$hd_pct")" "$hd_pct" "$R"
 }
 
+# ---------------------------------------------------------------------------
+# info
+# ---------------------------------------------------------------------------
 cmd_info() {
-  require_project "${1:-}"
-  incus info "$1" --project "$1"
+  local name="${1:-}"
+  require_project "$name"
+
+  local state ipv4 mem memp limit allow snaps
+  IFS=, read -r state ipv4 mem memp < <(incus list "$name" --project "$name" -f csv -c s4mM)
+  ipv4=${ipv4%% *}
+  memp=${memp%\%}
+  limit=$(incus config get "$name" limits.memory --project "$name" 2>/dev/null || true)
+  allow=$(incus config get "$name" limits.cpu.allowance --project "$name" 2>/dev/null || true)
+
+  heading "$name"
+  kv "state"   "$(state_color "$state")$(state_text "$state")${R}"
+  kv "address" "${ipv4:--}"
+  if [ -n "$mem" ]; then
+    kv "memory" "${mem} ${GRY}/${R} ${limit:--}  $(bar "$memp" 14) $(pct_color "$memp")${memp%%.*}%${R}"
+  else
+    kv "memory" "${GRY}-${R}  ${GRY}limit${R} ${limit:--}"
+  fi
+  kv "cpu"     "$(allowance_to_cores "$allow") ${GRY}(CFS quota)${R}"
+  printf '\n'
+  kv "attach"  "${CYN}herdr --remote ${name}.${DNS_DOMAIN}${R}"
+  kv "shell"   "${CYN}ssh ${name}.${DNS_DOMAIN}${R}"
+  kv "host"    "${CYN}project shell ${name}${R}"
+
+  snaps=$(incus snapshot list "$name" --project "$name" -f csv 2>/dev/null | grep -c . || true)
+  printf '\n'
+  kv "snapshots" "${snaps:-0}"
+  if [ "${snaps:-0}" != "0" ]; then
+    incus snapshot list "$name" --project "$name" -f csv 2>/dev/null \
+      | awk -F, -v g="$GRY" -v r="$R" 'NF{printf "    %s%-24s%s %s\n", g, $1, r, $2}'
+  fi
+  printf '\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -158,11 +358,11 @@ cmd_shell() {
 # ディスパッチ
 # ---------------------------------------------------------------------------
 case "${1:-}" in
-  create)         shift; cmd_create "$@" ;;
-  remove|rm)      shift; cmd_remove "$@" ;;
-  list|ls)        shift; cmd_list "$@" ;;
-  info)           shift; cmd_info "$@" ;;
-  shell|sh)       shift; cmd_shell "$@" ;;
+  create)            shift; cmd_create "$@" ;;
+  remove|rm)         shift; cmd_remove "$@" ;;
+  list|ls)           shift; cmd_list  "$@" ;;
+  info)              shift; cmd_info  "$@" ;;
+  shell|sh)          shift; cmd_shell "$@" ;;
   ""|help|-h|--help) usage ;;
-  *)              echo "不明なサブコマンド: $1" >&2; echo; usage; exit 1 ;;
+  *)                 printf '%s✗%s 不明なサブコマンド: %s\n' "$RED" "$R" "$1" >&2; usage; exit 1 ;;
 esac
